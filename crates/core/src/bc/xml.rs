@@ -141,6 +141,12 @@ pub struct BcXml {
     /// Read and write users
     #[serde(rename = "UserList", skip_serializing_if = "Option::is_none")]
     pub user_list: Option<UserList>,
+    /// HDD/SD disk list (MSG 102 response)
+    #[serde(rename = "HddInfoList", skip_serializing_if = "Option::is_none")]
+    pub hdd_info_list: Option<HddInfoList>,
+    /// Format disk request wrapper (MSG 103 request)
+    #[serde(rename = "formatExpandCfg", skip_serializing_if = "Option::is_none")]
+    pub format_expand_cfg: Option<FormatExpandCfg>,
 }
 
 impl BcXml {
@@ -1613,6 +1619,75 @@ pub struct User {
     /// | modify | Indicates that the user should be modified. It seems like only the password can be changed.                        |
     #[serde(rename = "userSetState")]
     pub user_set_state: String,
+}
+
+/// HDD/SD disk list (MSG 102 response)
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct HddInfoList {
+    /// XML Version
+    #[serde(rename = "@version")]
+    pub version: String,
+    /// List of disk info entries
+    #[serde(default, rename = "HddInfo")]
+    pub hdd_info: Vec<HddInfo>,
+}
+
+/// Single disk/SD slot info
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct HddInfo {
+    /// Disk/slot number
+    pub number: u8,
+    /// Capacity in GB (optional in some cameras)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u32>,
+    /// Format status (e.g. 1 = formatted)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<u8>,
+    /// Mount status (e.g. 1 = mounted)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount: Option<u8>,
+    /// Remaining size in GB
+    #[serde(rename = "remainSize", skip_serializing_if = "Option::is_none")]
+    pub remain_size: Option<u32>,
+    /// Remaining size in MB
+    #[serde(rename = "remainSizeM", skip_serializing_if = "Option::is_none")]
+    pub remain_size_m: Option<u32>,
+    /// Used flag/count (from RE notes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used: Option<u8>,
+    /// Type (from RE: 0→1, 1→2, else 0)
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_: Option<u8>,
+}
+
+/// Wrapper for format-disk request (MSG 103)
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct FormatExpandCfg {
+    /// List of disks to format with version and HddInit entries
+    #[serde(rename = "HddInitList")]
+    pub hdd_init_list: HddInitList,
+}
+
+/// Format disk list (request body for MSG 103)
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct HddInitList {
+    /// XML Version
+    #[serde(rename = "@version")]
+    pub version: String,
+    /// Disks to format
+    #[serde(rename = "HddInit")]
+    pub hdd_init: Vec<HddInit>,
+}
+
+/// Single disk format request
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct HddInit {
+    /// Disk/slot index (from HddInfo.number)
+    #[serde(rename = "initId")]
+    pub init_id: u8,
+    /// 0 = quick format, 1 = full format
+    #[serde(rename = "type")]
+    pub type_: u8,
 }
 
 /// Convience function to return the xml version used throughout the library

@@ -133,6 +133,11 @@ impl BcCamera {
             sub_login.send(modern_login).await?;
             let modern_reply = sub_login.recv().await?;
             if modern_reply.meta.response_code != 200 {
+                log::warn!(
+                    "Camera login rejected: response_code={} (expected 200). \
+                     Check username/password and try max_encryption = \"BcEncrypt\" in config.",
+                    modern_reply.meta.response_code
+                );
                 return Err(Error::CameraLoginFail);
             }
 

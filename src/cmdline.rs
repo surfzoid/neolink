@@ -17,6 +17,7 @@ pub struct Opt {
 
 #[derive(Parser, Debug)]
 pub enum Command {
+    Disk(super::disk::Opt),
     #[cfg(feature = "gstreamer")]
     Rtsp(super::rtsp::Opt),
     StatusLight(super::statusled::Opt),

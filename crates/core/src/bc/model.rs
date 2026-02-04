@@ -104,6 +104,10 @@ pub const MSG_ID_GET_ZOOM_FOCUS: u32 = 294;
 pub const MSG_ID_SET_ZOOM_FOCUS: u32 = 295;
 /// Get the floodlight task xml
 pub const MSG_ID_FLOODLIGHT_TASKS_READ: u32 = 438;
+/// Get HDD/SD disk list (HDDInfoList)
+pub const MSG_ID_HDD_INFO_LIST: u32 = 102;
+/// Format disk(s) (HddInitList)
+pub const MSG_ID_HDD_INIT_LIST: u32 = 103;
 
 /// An empty password in legacy format
 pub const EMPTY_LEGACY_PASSWORD: &str =
