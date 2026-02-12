@@ -114,4 +114,20 @@ pub enum ReplayCommand {
         #[arg(long)]
         name: String,
     },
+    /// Search recordings by alarm/AI type (MSG 175). Server-side filtering by detection type.
+    AlarmSearch {
+        /// Start date (YYYY-MM-DD)
+        #[arg(long)]
+        start: String,
+        /// End date (YYYY-MM-DD). Defaults to start if omitted
+        #[arg(long)]
+        end: Option<String>,
+        /// Stream type: 0 = mainStream, 1 = subStream
+        #[arg(long, default_value = "1")]
+        stream_type: u8,
+        /// Alarm/AI types to search for (comma-separated, e.g. "md,people,vehicle,dog_cat").
+        /// Defaults to all known types.
+        #[arg(long, default_value = ALL_RECORD_TYPES)]
+        alarm_types: String,
+    },
 }

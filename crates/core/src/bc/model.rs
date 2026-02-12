@@ -133,6 +133,8 @@ pub const MSG_ID_DAY_RECORDS: u32 = 142;
 pub const MSG_ID_DOWNLOAD_BY_TIME: u32 = 143;
 /// Stop download-by-time (no payload)
 pub const MSG_ID_DOWNLOAD_STOP: u32 = 144;
+/// Alarm video search: find recordings by alarm/AI type (findAlarmVideo). 0xAF = 175.
+pub const MSG_ID_ALARM_VIDEO_SEARCH: u32 = 175;
 
 /// An empty password in legacy format
 pub const EMPTY_LEGACY_PASSWORD: &str =

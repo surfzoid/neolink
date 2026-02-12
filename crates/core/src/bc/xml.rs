@@ -156,6 +156,9 @@ pub struct BcXml {
     /// Replay seek (MSG 123 request)
     #[serde(rename = "ReplaySeek", skip_serializing_if = "Option::is_none")]
     pub replay_seek: Option<ReplaySeek>,
+    /// Alarm video search (MSG 175 request/response)
+    #[serde(rename = "findAlarmVideo", skip_serializing_if = "Option::is_none")]
+    pub find_alarm_video: Option<FindAlarmVideo>,
 }
 
 impl BcXml {
@@ -1856,6 +1859,50 @@ pub struct ReplaySeek {
     /// Seek target time
     #[serde(rename = "seekTime")]
     pub seek_time: ReplayDateTime,
+}
+
+/// Alarm video search request/response (MSG 175).
+///
+/// START (search): channelId + streamType + startTime + endTime + alarmType + eventAlarmType items.
+/// DO (paginate): just fileHandle from previous response.
+/// Response: channelId + fileHandle + streamType + alarmType + startTime + endTime.
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct FindAlarmVideo {
+    /// XML version
+    #[serde(rename = "@version", skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Channel ID
+    #[serde(rename = "channelId", skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<u8>,
+    /// File handle (for pagination; omit in initial search)
+    #[serde(rename = "fileHandle", skip_serializing_if = "Option::is_none")]
+    pub file_handle: Option<i32>,
+    /// Stream type (0 = mainStream, 1 = subStream)
+    #[serde(rename = "streamType", skip_serializing_if = "Option::is_none")]
+    pub stream_type: Option<u8>,
+    /// Don't search video (0 = search video, 1 = events only)
+    #[serde(rename = "notSearchVideo", skip_serializing_if = "Option::is_none")]
+    pub not_search_video: Option<u8>,
+    /// Start of search range
+    #[serde(rename = "startTime", skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<ReplayDateTime>,
+    /// End of search range
+    #[serde(rename = "endTime", skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<ReplayDateTime>,
+    /// Alarm type summary string (e.g. "md, people, vehicle")
+    #[serde(rename = "alarmType", skip_serializing_if = "Option::is_none")]
+    pub alarm_type: Option<String>,
+    /// Individual alarm type items (each `<i>tag</i>`)
+    #[serde(rename = "eventAlarmType", skip_serializing_if = "Option::is_none")]
+    pub event_alarm_type: Option<EventAlarmType>,
+}
+
+/// List of alarm type items for findAlarmVideo `<eventAlarmType>`.
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct EventAlarmType {
+    /// Individual alarm type items
+    #[serde(rename = "i", default)]
+    pub items: Vec<String>,
 }
 
 /// Convience function to return the xml version used throughout the library

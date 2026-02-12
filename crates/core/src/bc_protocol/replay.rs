@@ -14,8 +14,8 @@ use std::convert::{TryFrom, TryInto};
 use crate::bc::{
     model::*,
     xml::{
-        xml_ver, BcPayloads, BcXml, DayRecord, DayRecordList, DayRecords, FileInfo, FileInfoList,
-        ReplayDateTime, ReplaySeek,
+        xml_ver, BcPayloads, BcXml, DayRecord, DayRecordList, DayRecords, EventAlarmType,
+        FileInfo, FileInfoList, FindAlarmVideo, ReplayDateTime, ReplaySeek,
     },
 };
 use crate::bcmedia::codex::BcMediaCodex;
@@ -407,6 +407,147 @@ impl BcCamera {
             Err(Error::UnintelligibleReply {
                 _reply: std::sync::Arc::new(Box::new(msg)),
                 why: "Expected FileInfoList xml in response",
+            })
+        }
+    }
+
+    /// Alarm video search: START (MSG 175). Returns the response containing a fileHandle.
+    /// `alarm_types` is a list of alarm/AI tags (e.g. ["md", "people", "vehicle"]).
+    /// `stream_type_num` is 0 for mainStream, 1 for subStream.
+    pub async fn alarm_video_search_start(
+        &self,
+        stream_type_num: u8,
+        alarm_types: &[&str],
+        start_time: ReplayDateTime,
+        end_time: ReplayDateTime,
+    ) -> Result<FindAlarmVideo> {
+        let connection = self.get_connection();
+        let msg_num = self.new_message_num();
+        let mut sub = connection
+            .subscribe(MSG_ID_ALARM_VIDEO_SEARCH, msg_num)
+            .await?;
+
+        let alarm_type_str = alarm_types.join(", ");
+        let xml = BcXml {
+            find_alarm_video: Some(FindAlarmVideo {
+                version: Some(xml_ver()),
+                channel_id: Some(self.channel_id),
+                file_handle: None,
+                stream_type: Some(stream_type_num),
+                not_search_video: Some(0),
+                start_time: Some(start_time),
+                end_time: Some(end_time),
+                alarm_type: Some(alarm_type_str),
+                event_alarm_type: Some(EventAlarmType {
+                    items: alarm_types.iter().map(|s| s.to_string()).collect(),
+                }),
+            }),
+            ..Default::default()
+        };
+
+        let msg = Bc {
+            meta: BcMeta {
+                msg_id: MSG_ID_ALARM_VIDEO_SEARCH,
+                channel_id: self.channel_id,
+                msg_num,
+                stream_type: 0,
+                response_code: 0,
+                class: 0x6414,
+            },
+            body: BcBody::ModernMsg(ModernMsg {
+                extension: None,
+                payload: Some(BcPayloads::BcXml(xml)),
+            }),
+        };
+
+        sub.send(msg).await?;
+        let msg = sub.recv().await?;
+
+        if msg.meta.response_code != 200 {
+            return Err(Error::CameraServiceUnavailable {
+                id: msg.meta.msg_id,
+                code: msg.meta.response_code,
+            });
+        }
+
+        if let BcBody::ModernMsg(ModernMsg {
+            payload:
+                Some(BcPayloads::BcXml(BcXml {
+                    find_alarm_video: Some(ref fav),
+                    ..
+                })),
+            ..
+        }) = msg.body
+        {
+            Ok(fav.clone())
+        } else {
+            Err(Error::UnintelligibleReply {
+                _reply: std::sync::Arc::new(Box::new(msg)),
+                why: "Expected findAlarmVideo xml in response",
+            })
+        }
+    }
+
+    /// Alarm video search: DO/paginate (MSG 175). Send a fileHandle to get the next batch of events.
+    /// Returns the AlarmEventList from the response.
+    pub async fn alarm_video_search_next(
+        &self,
+        file_handle: i32,
+    ) -> Result<FindAlarmVideo> {
+        let connection = self.get_connection();
+        let msg_num = self.new_message_num();
+        let mut sub = connection
+            .subscribe(MSG_ID_ALARM_VIDEO_SEARCH, msg_num)
+            .await?;
+
+        let xml = BcXml {
+            find_alarm_video: Some(FindAlarmVideo {
+                version: Some(xml_ver()),
+                file_handle: Some(file_handle),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let msg = Bc {
+            meta: BcMeta {
+                msg_id: MSG_ID_ALARM_VIDEO_SEARCH,
+                channel_id: self.channel_id,
+                msg_num,
+                stream_type: 0,
+                response_code: 0,
+                class: 0x6414,
+            },
+            body: BcBody::ModernMsg(ModernMsg {
+                extension: None,
+                payload: Some(BcPayloads::BcXml(xml)),
+            }),
+        };
+
+        sub.send(msg).await?;
+        let msg = sub.recv().await?;
+
+        if msg.meta.response_code != 200 {
+            return Err(Error::CameraServiceUnavailable {
+                id: msg.meta.msg_id,
+                code: msg.meta.response_code,
+            });
+        }
+
+        if let BcBody::ModernMsg(ModernMsg {
+            payload:
+                Some(BcPayloads::BcXml(BcXml {
+                    find_alarm_video: Some(ref fav),
+                    ..
+                })),
+            ..
+        }) = msg.body
+        {
+            Ok(fav.clone())
+        } else {
+            Err(Error::UnintelligibleReply {
+                _reply: std::sync::Arc::new(Box::new(msg)),
+                why: "Expected findAlarmVideo xml in response",
             })
         }
     }

@@ -1520,6 +1520,97 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
             )
             .await?;
         }
+        cmdline::ReplayCommand::AlarmSearch {
+            start,
+            end,
+            stream_type,
+            alarm_types,
+        } => {
+            let (sy, sm, sd) = parse_date(&start)?;
+            let end_str = end.as_deref().unwrap_or(&start);
+            let (ey, em, ed) = parse_date(end_str)?;
+            let start_time = date_to_replay_start(sy, sm, sd);
+            let end_time = date_to_replay_end(ey, em, ed);
+
+            let alarm_list: Vec<String> = alarm_types.split(',').map(|s| s.trim().to_string()).collect();
+            let alarm_refs: Vec<&str> = alarm_list.iter().map(|s| s.as_str()).collect();
+
+            // START: send search params, get handle
+            let result = camera
+                .run_task(|cam| {
+                    let st = start_time.clone();
+                    let et = end_time.clone();
+                    let ar: Vec<String> = alarm_refs.iter().map(|s| s.to_string()).collect();
+                    Box::pin(async move {
+                        let refs: Vec<&str> = ar.iter().map(|s| s.as_str()).collect();
+                        cam.alarm_video_search_start(stream_type, &refs, st, et)
+                            .await
+                            .context("Alarm video search START failed")
+                    })
+                })
+                .await?;
+
+            println!("Alarm search response:");
+            println!("  channelId:  {:?}", result.channel_id);
+            println!("  fileHandle: {:?}", result.file_handle);
+            println!("  streamType: {:?}", result.stream_type);
+            println!("  alarmType:  {:?}", result.alarm_type);
+            if let Some(ref st) = result.start_time {
+                println!("  startTime:  {}", format_replay_datetime(st));
+            }
+            if let Some(ref et) = result.end_time {
+                println!("  endTime:    {}", format_replay_datetime(et));
+            }
+
+            // If we got a handle, paginate to collect all events
+            if let Some(handle) = result.file_handle {
+                if handle >= 0 {
+                    println!("\nPaginating with handle {}...", handle);
+                    let mut page = 0;
+                    loop {
+                        page += 1;
+                        let next_result = camera
+                            .run_task(|cam| {
+                                Box::pin(async move {
+                                    cam.alarm_video_search_next(handle)
+                                        .await
+                                        .context("Alarm video search DO/paginate failed")
+                                })
+                            })
+                            .await;
+                        match next_result {
+                            Ok(fav) => {
+                                println!("\n--- Page {} ---", page);
+                                println!("  channelId:  {:?}", fav.channel_id);
+                                println!("  fileHandle: {:?}", fav.file_handle);
+                                println!("  alarmType:  {:?}", fav.alarm_type);
+                                if let Some(ref st) = fav.start_time {
+                                    println!("  startTime:  {}", format_replay_datetime(st));
+                                }
+                                if let Some(ref et) = fav.end_time {
+                                    println!("  endTime:    {}", format_replay_datetime(et));
+                                }
+                                // If no more data or handle changes, stop
+                                if fav.file_handle.is_none() || fav.file_handle == Some(-1) {
+                                    println!("\nEnd of alarm search results.");
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                // Camera returns non-200 when no more results
+                                log::debug!("Alarm search pagination ended: {}", e);
+                                println!("\nEnd of alarm search results (page {}).", page);
+                                break;
+                            }
+                        }
+                        if page >= 100 {
+                            println!("Reached page limit (100). Stopping.");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         cmdline::ReplayCommand::Stop { name } => {
             camera
                 .run_task(|cam| {
