@@ -105,77 +105,73 @@ pub fn mux_nals_to_mp4(
         None
     };
 
-    pipeline.set_state(State::Playing)?;
-
-    // Embed metadata as MP4 tags via a TagEvent on the video appsrc
+    // Embed metadata as MP4 tags via mp4mux's TagSetter interface
     if metadata.record_type.is_some()
         || metadata.start_time.is_some()
         || metadata.end_time.is_some()
         || metadata.camera_name.is_some()
     {
-        let mut tags = gstreamer::TagList::new();
-        {
-            let tags_mut = tags.get_mut().unwrap();
-            // AI detection labels as keywords (comma-separated tag list)
-            if let Some(ref rt) = metadata.record_type {
-                // Extract just the AI/alarm tags (skip generic recording triggers)
-                let ai_tags: Vec<&str> = rt
-                    .split(',')
-                    .map(|s| s.trim())
-                    .filter(|s| {
-                        matches!(
-                            *s,
-                            "people" | "vehicle" | "face" | "dog_cat" | "package"
-                                | "visitor" | "cry" | "crossline" | "intrusion"
-                                | "loitering" | "nonmotorveh" | "md" | "pir"
-                                | "io" | "other" | "legacy" | "loss"
-                        )
-                    })
-                    .collect();
-                if !ai_tags.is_empty() {
-                    let kw = ai_tags.join(", ");
-                    tags_mut.add::<gstreamer::tags::Keywords>(
-                        &kw.as_str(),
-                        gstreamer::TagMergeMode::Replace,
-                    );
-                }
-                let comment = format!("recordType: {}", rt);
-                tags_mut.add::<gstreamer::tags::Comment>(
-                    &comment.as_str(),
+        let tag_setter = mp4mux
+            .dynamic_cast_ref::<gstreamer::TagSetter>()
+            .expect("mp4mux should implement TagSetter");
+        // AI detection labels as keywords
+        if let Some(ref rt) = metadata.record_type {
+            let ai_tags: Vec<&str> = rt
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| {
+                    matches!(
+                        *s,
+                        "people" | "vehicle" | "face" | "dog_cat" | "package"
+                            | "visitor" | "cry" | "crossline" | "intrusion"
+                            | "loitering" | "nonmotorveh" | "md" | "pir"
+                            | "io" | "other" | "legacy" | "loss"
+                    )
+                })
+                .collect();
+            if !ai_tags.is_empty() {
+                let kw = ai_tags.join(", ");
+                tag_setter.add_tag::<gstreamer::tags::Keywords>(
+                    &kw.as_str(),
                     gstreamer::TagMergeMode::Replace,
                 );
             }
-            // Build description from timing + camera info
-            let mut desc_parts = Vec::new();
-            if let Some(ref name) = metadata.camera_name {
-                desc_parts.push(format!("Camera: {}", name));
-                tags_mut.add::<gstreamer::tags::Title>(
-                    &name.as_str(),
-                    gstreamer::TagMergeMode::Replace,
-                );
-            }
-            if let Some(ref st) = metadata.start_time {
-                desc_parts.push(format!("Start: {}", st));
-            }
-            if let Some(ref et) = metadata.end_time {
-                desc_parts.push(format!("End: {}", et));
-            }
-            if !desc_parts.is_empty() {
-                let desc = desc_parts.join("; ");
-                tags_mut.add::<gstreamer::tags::Description>(
-                    &desc.as_str(),
-                    gstreamer::TagMergeMode::Replace,
-                );
-            }
-            tags_mut.add::<gstreamer::tags::Encoder>(
-                &"neolink replay",
+            let comment = format!("recordType: {}", rt);
+            tag_setter.add_tag::<gstreamer::tags::Comment>(
+                &comment.as_str(),
                 gstreamer::TagMergeMode::Replace,
             );
         }
-        let tag_event = gstreamer::event::Tag::new(tags);
-        video_src.send_event(tag_event);
-        log::info!("Replay GStreamer: embedded metadata tags into MP4");
+        // Build description from timing + camera info
+        let mut desc_parts = Vec::new();
+        if let Some(ref name) = metadata.camera_name {
+            desc_parts.push(format!("Camera: {}", name));
+            tag_setter.add_tag::<gstreamer::tags::Title>(
+                &name.as_str(),
+                gstreamer::TagMergeMode::Replace,
+            );
+        }
+        if let Some(ref st) = metadata.start_time {
+            desc_parts.push(format!("Start: {}", st));
+        }
+        if let Some(ref et) = metadata.end_time {
+            desc_parts.push(format!("End: {}", et));
+        }
+        if !desc_parts.is_empty() {
+            let desc = desc_parts.join("; ");
+            tag_setter.add_tag::<gstreamer::tags::Description>(
+                &desc.as_str(),
+                gstreamer::TagMergeMode::Replace,
+            );
+        }
+        tag_setter.add_tag::<gstreamer::tags::Encoder>(
+            &"neolink replay",
+            gstreamer::TagMergeMode::Replace,
+        );
+        log::info!("Replay GStreamer: set metadata tags on mp4mux TagSetter");
     }
+
+    pipeline.set_state(State::Playing)?;
 
     // Push video NALs with per-frame PTS
     let base_ts = timestamps_us.first().copied().unwrap_or(0);
