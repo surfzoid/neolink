@@ -18,6 +18,7 @@ mod connection;
 mod credentials;
 mod disk;
 mod email;
+mod replay;
 mod errors;
 mod floodlight;
 mod keepalive;

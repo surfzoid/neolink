@@ -147,6 +147,15 @@ pub struct BcXml {
     /// Format disk request wrapper (MSG 103 request)
     #[serde(rename = "formatExpandCfg", skip_serializing_if = "Option::is_none")]
     pub format_expand_cfg: Option<FormatExpandCfg>,
+    /// Day records in range (MSG 142 request/response)
+    #[serde(rename = "DayRecords", skip_serializing_if = "Option::is_none")]
+    pub day_records: Option<DayRecords>,
+    /// File list / file info (MSG 13, 14, 15, 16, 5, 7 request/response)
+    #[serde(rename = "FileInfoList", skip_serializing_if = "Option::is_none")]
+    pub file_info_list: Option<FileInfoList>,
+    /// Replay seek (MSG 123 request)
+    #[serde(rename = "ReplaySeek", skip_serializing_if = "Option::is_none")]
+    pub replay_seek: Option<ReplaySeek>,
 }
 
 impl BcXml {
@@ -335,7 +344,10 @@ pub struct Extension {
     /// Encrypted binary has this to verify successful decryption
     #[serde(rename = "checkValue", skip_serializing_if = "Option::is_none")]
     pub check_value: Option<i32>,
-    /// Used in newer encrypted payload packets
+    /// E1/replay: start offset in the following binary payload that is encrypted (Ghidra: netc_query_param_t +0x138).
+    #[serde(rename = "encryptPos", skip_serializing_if = "Option::is_none")]
+    pub encrypt_pos: Option<u32>,
+    /// E1/replay: length of the encrypted region (Ghidra: netc_query_param_t +0x13c). With encrypt_pos, only this region is decrypted.
     #[serde(rename = "encryptLen", skip_serializing_if = "Option::is_none")]
     pub encrypt_len: Option<u32>,
 }
@@ -351,6 +363,7 @@ impl Default for Extension {
             rf_id: None,
             check_pos: None,
             check_value: None,
+            encrypt_pos: None,
             encrypt_len: None,
         }
     }
@@ -1690,6 +1703,161 @@ pub struct HddInit {
     pub type_: u8,
 }
 
+// ---------- Replay (SD playback) ----------
+
+/// Replay time: year, month, day, hour, minute, second (used in startTime, endTime, seekTime).
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct ReplayDateTime {
+    /// Year
+    pub year: i32,
+    /// Month (1–12)
+    pub month: u8,
+    /// Day of month (1–31)
+    pub day: u8,
+    /// Hour (0–23)
+    pub hour: u8,
+    /// Minute (0–59)
+    pub minute: u8,
+    /// Second (0–59)
+    pub second: u8,
+}
+
+/// Day records request/response (MSG 142).
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct DayRecords {
+    /// XML version
+    #[serde(rename = "@version")]
+    pub version: String,
+    /// Start of query range
+    #[serde(rename = "startTime")]
+    pub start_time: ReplayDateTime,
+    /// End of query range
+    #[serde(rename = "endTime")]
+    pub end_time: ReplayDateTime,
+    /// List of day records (request: one entry; response: may be extended)
+    #[serde(rename = "DayRecordList")]
+    pub day_record_list: DayRecordList,
+    /// Present in response: which days have recordings (e.g. type "normal")
+    #[serde(rename = "dayTypeList", skip_serializing_if = "Option::is_none")]
+    pub day_type_list: Option<DayTypeList>,
+}
+
+/// List of day record entries for DayRecords.
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct DayRecordList {
+    /// Day record entries
+    #[serde(rename = "DayRecord")]
+    pub day_record: Vec<DayRecord>,
+}
+
+/// Single day record (index + channel).
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct DayRecord {
+    /// Day index in range (0 = first day)
+    pub index: u8,
+    /// Channel ID
+    #[serde(rename = "channelId")]
+    pub channel_id: u8,
+}
+
+/// Response list of day types (which days have recordings).
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct DayTypeList {
+    /// Day type entries
+    #[serde(rename = "dayType")]
+    pub day_type: Vec<DayType>,
+}
+
+/// Day type in DayTypeList (e.g. "normal").
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct DayType {
+    /// Day index
+    pub index: u8,
+    /// Type string (e.g. "normal")
+    #[serde(rename = "type")]
+    pub type_: String,
+}
+
+/// FileInfoList wrapper (MSG 13, 14, 15, 16, 5, 7).
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct FileInfoList {
+    /// XML version (optional in request)
+    #[serde(rename = "@version", skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// File info entries
+    #[serde(rename = "FileInfo", default)]
+    pub file_info: Vec<FileInfo>,
+}
+
+/// Single file info (request/response; fields vary by message).
+///
+/// Field order matches Android app MSG 8 start-replay (BaichuanDownloader): uid, Id, name,
+/// channelId, supportSub, streamType, startTime. Other fields follow for file-list/stop etc.
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize, Clone)]
+pub struct FileInfo {
+    /// UID (optional; Android sends when non-empty; use e.g. 0 for MSG 8 start replay on E1)
+    #[serde(rename = "uid", skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    /// File/list id string (optional; Android "Id" at iVar2+0x424 for MSG 8)
+    #[serde(rename = "Id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// File name (e.g. from file list or for stop)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Channel ID
+    #[serde(rename = "channelId", skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<u8>,
+    /// Support sub stream (0 or 1)
+    #[serde(rename = "supportSub", skip_serializing_if = "Option::is_none")]
+    pub support_sub: Option<u8>,
+    /// Stream type (e.g. mainStream, subStream)
+    #[serde(rename = "streamType", skip_serializing_if = "Option::is_none")]
+    pub stream_type: Option<String>,
+    /// Start time of recording
+    #[serde(rename = "startTime", skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<ReplayDateTime>,
+    /// Handle from get-file-list (used in list-by-handle)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<u32>,
+    /// Record type (e.g. manual,sched,md)
+    #[serde(rename = "recordType", skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
+    /// Size low 32 bits (bytes)
+    #[serde(rename = "sizeL", skip_serializing_if = "Option::is_none")]
+    pub size_l: Option<u32>,
+    /// Size high 32 bits (bytes)
+    #[serde(rename = "sizeH", skip_serializing_if = "Option::is_none")]
+    pub size_h: Option<u32>,
+    /// End time of recording
+    #[serde(rename = "endTime", skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<ReplayDateTime>,
+    /// File type (e.g. mp4)
+    #[serde(rename = "fileType", skip_serializing_if = "Option::is_none")]
+    pub file_type: Option<String>,
+    /// Contains audio flag
+    #[serde(rename = "containsAudio", skip_serializing_if = "Option::is_none")]
+    pub contains_audio: Option<u8>,
+    /// Play speed (for playback)
+    #[serde(rename = "playSpeed", skip_serializing_if = "Option::is_none")]
+    pub play_speed: Option<u32>,
+}
+
+/// Replay seek request (MSG 123).
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct ReplaySeek {
+    /// XML version
+    #[serde(rename = "@version")]
+    pub version: String,
+    /// Channel ID
+    #[serde(rename = "channelId")]
+    pub channel_id: u8,
+    /// Sequence (epoch seconds)
+    pub seq: u32,
+    /// Seek target time
+    #[serde(rename = "seekTime")]
+    pub seek_time: ReplayDateTime,
+}
+
 /// Convience function to return the xml version used throughout the library
 pub fn xml_ver() -> String {
     "1.1".to_string()
@@ -1969,9 +2137,31 @@ fn test_enc3_extension() {
     match b {
         Extension {
             encrypt_len: Some(1024),
+            encrypt_pos: None,
             binary_data: Some(1),
             check_pos: Some(0),
             check_value: Some(1667510320),
+            ..
+        } => {}
+        _ => panic!(),
+    }
+
+    // E1: encryptPos + encryptLen (region decrypt)
+    let sample_pos = indoc!(
+        r#"<?xml version="1.0" encoding="UTF-8" ?>
+        <Extension version="1.1">
+        <binaryData>1</binaryData>
+        <encryptPos>0</encryptPos>
+        <encryptLen>32</encryptLen>
+        </Extension>
+        "#
+    );
+    let b = Extension::try_parse(sample_pos.as_bytes()).unwrap();
+    match b {
+        Extension {
+            binary_data: Some(1),
+            encrypt_pos: Some(0),
+            encrypt_len: Some(32),
             ..
         } => {}
         _ => panic!(),

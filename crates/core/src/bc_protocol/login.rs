@@ -90,7 +90,7 @@ impl BcCamera {
                 }
                 _ => {
                     return Err(Error::UnintelligibleReply {
-                        reply: std::sync::Arc::new(Box::new(legacy_reply)),
+                        _reply: std::sync::Arc::new(Box::new(legacy_reply)),
                         why: "Expected an Encryption message back",
                     })
                 }
@@ -160,7 +160,7 @@ impl BcCamera {
                 }) => return Err(Error::AuthFailed),
                 _ => {
                     return Err(Error::UnintelligibleReply {
-                        reply: std::sync::Arc::new(Box::new(legacy_reply)),
+                        _reply: std::sync::Arc::new(Box::new(legacy_reply)),
                         why: "Expected a DeviceInfo message back from login",
                     })
                 }

@@ -41,6 +41,7 @@ mod cmdline;
 mod common;
 mod config;
 mod disk;
+mod replay;
 #[cfg(feature = "gstreamer")]
 mod image;
 mod mqtt;
@@ -144,6 +145,13 @@ async fn main() -> Result<()> {
         }
         Some(Command::Disk(opts)) => {
             disk::main(opts, neo_reactor.clone()).await?;
+        }
+        Some(Command::Replay(opts)) => {
+            eprintln!("[DEBUG] main: about to call replay::main");
+            let result = replay::main(opts, neo_reactor.clone()).await;
+            eprintln!("[DEBUG] main: replay::main returned: {:?}", result.is_ok());
+            result?;
+            eprintln!("[DEBUG] main: after replay::main, about to return Ok(())");
         }
         Some(Command::Services(opts)) => {
             services::main(opts, neo_reactor.clone()).await?;
