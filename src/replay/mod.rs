@@ -171,10 +171,31 @@ fn compute_actual_fps(timestamps_us: &[u32]) -> Option<f64> {
     }
 }
 
+/// Recording metadata for MP4 embedding.
+#[derive(Debug, Default, Clone)]
+struct RecordingMeta {
+    /// Camera recording type / AI detection tags (e.g. "manual,sched,md,people,vehicle").
+    pub record_type: Option<String>,
+    /// Recording start time as "YYYY-MM-DD HH:MM:SS".
+    pub start_time: Option<String>,
+    /// Recording end time as "YYYY-MM-DD HH:MM:SS".
+    pub end_time: Option<String>,
+    /// Camera name / channel.
+    pub camera_name: Option<String>,
+}
+
 /// Mux decoded BcMedia NALs + optional AAC audio to MP4.
 /// Uses GStreamer (with per-frame PTS from timestamps) when available; falls back to ffmpeg.
+/// If `meta` is provided, AI detection tags and timing info are embedded in the MP4.
 /// Returns Ok(true) on success.
-async fn mux_to_mp4(nals: &[Vec<u8>], aac_data: &[u8], fps: u8, timestamps_us: &[u32], output: &Path) -> Result<bool> {
+async fn mux_to_mp4(
+    nals: &[Vec<u8>],
+    aac_data: &[u8],
+    fps: u8,
+    timestamps_us: &[u32],
+    output: &Path,
+    meta: &RecordingMeta,
+) -> Result<bool> {
     if let Some(afps) = compute_actual_fps(timestamps_us) {
         log::info!(
             "Replay: actual avg fps from timestamps = {:.2} (declared fps = {})",
@@ -189,8 +210,14 @@ async fn mux_to_mp4(nals: &[Vec<u8>], aac_data: &[u8], fps: u8, timestamps_us: &
         let timestamps_us = timestamps_us.to_vec();
         let aac_data = aac_data.to_vec();
         let path = output.to_path_buf();
+        let gst_meta = gst::Mp4Metadata {
+            record_type: meta.record_type.clone(),
+            start_time: meta.start_time.clone(),
+            end_time: meta.end_time.clone(),
+            camera_name: meta.camera_name.clone(),
+        };
         match tokio::task::spawn_blocking(move || {
-            gst::mux_nals_to_mp4(&nals, &timestamps_us, &aac_data, &path)
+            gst::mux_nals_to_mp4(&nals, &timestamps_us, &aac_data, &path, &gst_meta)
         })
         .await
         {
@@ -223,6 +250,13 @@ async fn mux_to_mp4(nals: &[Vec<u8>], aac_data: &[u8], fps: u8, timestamps_us: &
         cmd.arg(&aac_path);
     }
     cmd.args(["-c", "copy", "-fps_mode", "cfr", "-r", &fps_str, "-movflags", "+faststart"]);
+    // Embed metadata
+    if let Some(ref rt) = meta.record_type {
+        cmd.args(["-metadata", &format!("comment=recordType: {}", rt)]);
+    }
+    if let Some(ref desc) = meta.start_time {
+        cmd.args(["-metadata", &format!("description=Start: {}", desc)]);
+    }
     cmd.arg(output);
 
     let status = cmd.status().await.context("Run ffmpeg for BcMedia mux")?;
@@ -231,6 +265,14 @@ async fn mux_to_mp4(nals: &[Vec<u8>], aac_data: &[u8], fps: u8, timestamps_us: &
         let _ = tokio::fs::remove_file(&aac_path).await;
     }
     Ok(status.success())
+}
+
+/// Format a ReplayDateTime as "YYYY-MM-DD HH:MM:SS".
+fn format_replay_datetime(dt: &ReplayDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+    )
 }
 
 /// Write NAL payloads as H.264 Annex B (start code + NAL). Payloads that already start with 0x00 0x00 0x01 or 0x00 0x00 0x00 0x01 are written as-is.
@@ -842,8 +884,8 @@ async fn run_replay_or_download(
     if duration.is_none() {
         log::info!("Replay: no --duration set; camera will stream until you stop or send response 300. Use --duration N to record N seconds then close.");
     }
-    // Get expected file size from file list so we can stop when received enough (some cameras never send 300).
-    let expected_size = camera
+    // Get file metadata (size, record_type with AI tags, timing) from file list.
+    let file_meta: Option<FileInfo> = camera
         .run_task(|cam| {
             let name = name.to_string();
             let stream_type = stream_type.to_string();
@@ -855,18 +897,24 @@ async fn run_replay_or_download(
         })
         .await
         .ok()
-        .flatten()
-        .and_then(|info| {
-            let l = info.size_l.unwrap_or(0) as u64;
-            let h = info.size_h.unwrap_or(0) as u64;
-            if l == 0 && h == 0 {
-                None
-            } else {
-                Some(l + (h << 32))
-            }
-        });
+        .flatten();
+    let expected_size = file_meta.as_ref().and_then(|info| {
+        let l = info.size_l.unwrap_or(0) as u64;
+        let h = info.size_h.unwrap_or(0) as u64;
+        if l == 0 && h == 0 { None } else { Some(l + (h << 32)) }
+    });
     if let Some(sz) = expected_size {
         log::info!("Replay: expected file size {} bytes (from file list), will stop when complete", sz);
+    }
+    // Build recording metadata for MP4 embedding
+    let recording_meta = RecordingMeta {
+        record_type: file_meta.as_ref().and_then(|f| f.record_type.clone()),
+        start_time: file_meta.as_ref().and_then(|f| f.start_time.as_ref().map(format_replay_datetime)),
+        end_time: file_meta.as_ref().and_then(|f| f.end_time.as_ref().map(format_replay_datetime)),
+        camera_name: None,
+    };
+    if let Some(ref rt) = recording_meta.record_type {
+        log::info!("Replay: file recordType = {}", rt);
     }
     let dump_limit = dump_replay.as_ref().and_then(|_| Some(dump_replay_limit.unwrap_or(131072)));
     let mut stream = camera
@@ -1026,7 +1074,7 @@ async fn run_replay_or_download(
                         let annex_b = annex_b_from_nals(&nals);
                         let is_mp4 = p.extension().map(|e| e == "mp4").unwrap_or(false);
                         if is_mp4 {
-                            if mux_to_mp4(&nals, &aac_data, fps, &timestamps_us, p).await? {
+                            if mux_to_mp4(&nals, &aac_data, fps, &timestamps_us, p, &recording_meta).await? {
                                 println!("Parsed BcMedia replay and muxed to {}", p.display());
                             } else {
                                 tokio::fs::write(p, &annex_b).await.context("Write H.264 fallback")?;
@@ -1096,6 +1144,14 @@ async fn run_download_by_time(
         end_time,
         stream_type
     );
+
+    // Build metadata from the time range (no FileInfo available for download-by-time)
+    let recording_meta = RecordingMeta {
+        record_type: None,
+        start_time: Some(format_replay_datetime(&start_time)),
+        end_time: Some(format_replay_datetime(&end_time)),
+        camera_name: None,
+    };
 
     let mut stream = camera
         .run_task(|cam| {
@@ -1208,7 +1264,7 @@ async fn run_download_by_time(
                     let annex_b = annex_b_from_nals(&nals);
                     let is_mp4 = output.extension().map(|e| e == "mp4").unwrap_or(false);
                     if is_mp4 {
-                        if mux_to_mp4(&nals, &aac_data, fps, &timestamps_us, &output).await? {
+                        if mux_to_mp4(&nals, &aac_data, fps, &timestamps_us, &output, &recording_meta).await? {
                             println!("Parsed BcMedia replay and muxed to {}", output.display());
                         } else {
                             tokio::fs::write(&output, &annex_b).await.context("Write H.264 fallback")?;
@@ -1488,6 +1544,12 @@ fn print_day_records(records: &DayRecords) {
     }
 }
 
+/// AI detection tag names from recordType.
+const AI_TAGS: &[&str] = &[
+    "people", "vehicle", "face", "dog_cat", "package", "visitor", "cry",
+    "crossline", "intrusion", "loitering", "nonmotorveh",
+];
+
 fn print_file_list(files: &[FileInfo]) {
     if files.is_empty() {
         println!("No files for this day.");
@@ -1495,21 +1557,23 @@ fn print_file_list(files: &[FileInfo]) {
     }
     println!("Files ({}):", files.len());
     for f in files {
-        let name = f
-            .name
-            .as_deref()
-            .unwrap_or("—");
+        let name = f.name.as_deref().unwrap_or("—");
         let size_l = f.size_l.unwrap_or(0);
         let size_h = f.size_h.unwrap_or(0);
         let size_mb = (size_l as u64 + ((size_h as u64) << 32)) / (1024 * 1024);
-        let stream = f
-            .stream_type
-            .as_deref()
-            .unwrap_or("—");
-        let rec_type = f
-            .record_type
-            .as_deref()
-            .unwrap_or("—");
-        println!("  {}  {} MB  {}  {}", name, size_mb, stream, rec_type);
+        let stream = f.stream_type.as_deref().unwrap_or("—");
+        let rec_type = f.record_type.as_deref().unwrap_or("");
+        // Split recordType into trigger (md/sched/manual/pir/io) and AI detections
+        let ai: Vec<&str> = rec_type
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| AI_TAGS.contains(s))
+            .collect();
+        let ai_str = if ai.is_empty() {
+            String::new()
+        } else {
+            format!("  [AI: {}]", ai.join(", "))
+        };
+        println!("  {}  {} MB  {}  {}{}", name, size_mb, stream, rec_type, ai_str);
     }
 }

@@ -11,6 +11,20 @@ use std::path::Path;
 /// Annex B start code.
 const START_CODE: &[u8] = &[0x00, 0x00, 0x00, 0x01];
 
+/// Optional metadata to embed in the MP4 container.
+#[derive(Debug, Default, Clone)]
+pub struct Mp4Metadata {
+    /// Camera recording type / AI detection tags (e.g. "manual,sched,md,people,vehicle,dog_cat").
+    /// Stored as MP4 comment + keywords.
+    pub record_type: Option<String>,
+    /// Recording start time as "YYYY-MM-DD HH:MM:SS".
+    pub start_time: Option<String>,
+    /// Recording end time as "YYYY-MM-DD HH:MM:SS".
+    pub end_time: Option<String>,
+    /// Camera name / channel.
+    pub camera_name: Option<String>,
+}
+
 /// Mux H.264 NALs with per-frame timestamps (+ optional AAC audio) to MP4 using GStreamer.
 ///
 /// Pipeline:
@@ -20,11 +34,13 @@ const START_CODE: &[u8] = &[0x00, 0x00, 0x00, 0x01];
 /// Each NAL in `nals` is pushed as a separate buffer with PTS derived from `timestamps_us`.
 /// `timestamps_us[i]` corresponds to `nals[i]` (microseconds, from BcMedia Iframe/Pframe header).
 /// If `aac_data` is non-empty, ADTS frames are split and pushed with cumulative PTS.
+/// If `metadata` is provided, AI detection tags and recording times are embedded as MP4 tags.
 pub fn mux_nals_to_mp4(
     nals: &[Vec<u8>],
     timestamps_us: &[u32],
     aac_data: &[u8],
     output_path: &Path,
+    metadata: &Mp4Metadata,
 ) -> Result<()> {
     gstreamer::init().context("GStreamer init")?;
 
@@ -90,6 +106,76 @@ pub fn mux_nals_to_mp4(
     };
 
     pipeline.set_state(State::Playing)?;
+
+    // Embed metadata as MP4 tags via a TagEvent on the video appsrc
+    if metadata.record_type.is_some()
+        || metadata.start_time.is_some()
+        || metadata.end_time.is_some()
+        || metadata.camera_name.is_some()
+    {
+        let mut tags = gstreamer::TagList::new();
+        {
+            let tags_mut = tags.get_mut().unwrap();
+            // AI detection labels as keywords (comma-separated tag list)
+            if let Some(ref rt) = metadata.record_type {
+                // Extract just the AI/alarm tags (skip generic recording triggers)
+                let ai_tags: Vec<&str> = rt
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| {
+                        matches!(
+                            *s,
+                            "people" | "vehicle" | "face" | "dog_cat" | "package"
+                                | "visitor" | "cry" | "crossline" | "intrusion"
+                                | "loitering" | "nonmotorveh" | "md" | "pir"
+                                | "io" | "other" | "legacy" | "loss"
+                        )
+                    })
+                    .collect();
+                if !ai_tags.is_empty() {
+                    let kw = ai_tags.join(", ");
+                    tags_mut.add::<gstreamer::tags::Keywords>(
+                        &kw.as_str(),
+                        gstreamer::TagMergeMode::Replace,
+                    );
+                }
+                let comment = format!("recordType: {}", rt);
+                tags_mut.add::<gstreamer::tags::Comment>(
+                    &comment.as_str(),
+                    gstreamer::TagMergeMode::Replace,
+                );
+            }
+            // Build description from timing + camera info
+            let mut desc_parts = Vec::new();
+            if let Some(ref name) = metadata.camera_name {
+                desc_parts.push(format!("Camera: {}", name));
+                tags_mut.add::<gstreamer::tags::Title>(
+                    &name.as_str(),
+                    gstreamer::TagMergeMode::Replace,
+                );
+            }
+            if let Some(ref st) = metadata.start_time {
+                desc_parts.push(format!("Start: {}", st));
+            }
+            if let Some(ref et) = metadata.end_time {
+                desc_parts.push(format!("End: {}", et));
+            }
+            if !desc_parts.is_empty() {
+                let desc = desc_parts.join("; ");
+                tags_mut.add::<gstreamer::tags::Description>(
+                    &desc.as_str(),
+                    gstreamer::TagMergeMode::Replace,
+                );
+            }
+            tags_mut.add::<gstreamer::tags::Encoder>(
+                &"neolink replay",
+                gstreamer::TagMergeMode::Replace,
+            );
+        }
+        let tag_event = gstreamer::event::Tag::new(tags);
+        video_src.send_event(tag_event);
+        log::info!("Replay GStreamer: embedded metadata tags into MP4");
+    }
 
     // Push video NALs with per-frame PTS
     let base_ts = timestamps_us.first().copied().unwrap_or(0);
