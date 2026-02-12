@@ -863,7 +863,7 @@ async fn run_replay_or_download(
             .run_task(|cam| {
                 let name = name.to_string();
                 let stream_type = stream_type.to_string();
-                let record_type = "manual,sched,md".to_string();
+                let record_type = cmdline::ALL_RECORD_TYPES.to_string();
                 Box::pin(async move {
                     cam.get_replay_file_duration_secs(&name, &stream_type, &record_type)
                         .await
@@ -889,7 +889,7 @@ async fn run_replay_or_download(
         .run_task(|cam| {
             let name = name.to_string();
             let stream_type = stream_type.to_string();
-            let record_type = "manual,sched,md".to_string();
+            let record_type = cmdline::ALL_RECORD_TYPES.to_string();
             Box::pin(async move {
                 let meta = cam.get_replay_file_metadata(&name, &stream_type, &record_type).await.ok().flatten();
                 Ok(meta)
@@ -1347,7 +1347,7 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
                             let et = et.clone();
                             Box::pin(
                                 async move {
-                                    cam.get_file_list_handle("subStream", "manual,sched,md", st, et)
+                                    cam.get_file_list_handle("subStream", cmdline::ALL_RECORD_TYPES, st, et)
                                         .await
                                         .context("Could not get file list handle")
                                 },
@@ -1384,6 +1384,7 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
             date,
             stream,
             record_type,
+            ai_filter,
         } => {
             let (y, m, d) = parse_date(&date)?;
             let start_time = date_to_replay_start(y, m, d);
@@ -1421,6 +1422,24 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
                     )
                 })
                 .await?;
+
+            // Apply --ai-filter: only show files whose recordType contains at least one requested tag
+            let files = if let Some(ref filter) = ai_filter {
+                let wanted: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
+                files
+                    .into_iter()
+                    .filter(|f| {
+                        if let Some(ref rt) = f.record_type {
+                            let tags: Vec<&str> = rt.split(',').map(|s| s.trim()).collect();
+                            wanted.iter().any(|w| tags.contains(w))
+                        } else {
+                            false
+                        }
+                    })
+                    .collect()
+            } else {
+                files
+            };
 
             print_file_list(&files);
         }

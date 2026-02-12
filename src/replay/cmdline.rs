@@ -1,5 +1,10 @@
 use clap::Parser;
 
+/// All known record types including AI detections. Used as default for file search
+/// so recordings triggered only by AI (without md/sched) are not missed.
+pub const ALL_RECORD_TYPES: &str =
+    "manual,sched,md,pir,io,people,vehicle,face,dog_cat,package,visitor,cry,crossline,intrusion,loitering,nonmotorveh,other,legacy,loss";
+
 /// Replay: list recording days, list files, start/stop playback (SD card).
 #[derive(Parser, Debug)]
 pub struct Opt {
@@ -28,9 +33,13 @@ pub enum ReplayCommand {
         /// Stream type: mainStream or subStream
         #[arg(long, default_value = "subStream")]
         stream: String,
-        /// Record types (comma-separated), e.g. manual,sched,md
-        #[arg(long, default_value = "manual,sched,md")]
+        /// Record types to search for (comma-separated). Defaults to all types including AI detections.
+        #[arg(long, default_value = ALL_RECORD_TYPES)]
         record_type: String,
+        /// Filter results by AI detection type (comma-separated, e.g. "people,vehicle,dog_cat").
+        /// Only files whose recordType contains at least one of these tags are shown.
+        #[arg(long)]
+        ai_filter: Option<String>,
     },
     /// Start replay playback (stream BCMedia for a recording file)
     Play {
