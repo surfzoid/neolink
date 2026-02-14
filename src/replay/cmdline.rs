@@ -1,7 +1,11 @@
 use clap::Parser;
 
-/// All known record types including AI detections. Used as default for file search
-/// so recordings triggered only by AI (without md/sched) are not missed.
+/// Standard record types for file search (MSG 14). AI-specific tags (people, vehicle, etc.)
+/// are in the response recordType field, not valid search parameters. Use --ai-filter to
+/// filter by AI detection tags client-side.
+pub const FILE_SEARCH_RECORD_TYPES: &str = "manual,sched,md,pir,io";
+
+/// All known record/alarm types including AI detections. Used for alarm search (MSG 175).
 pub const ALL_RECORD_TYPES: &str =
     "manual,sched,md,pir,io,people,vehicle,face,dog_cat,package,visitor,cry,crossline,intrusion,loitering,nonmotorveh,other,legacy,loss";
 
@@ -33,8 +37,8 @@ pub enum ReplayCommand {
         /// Stream type: mainStream or subStream
         #[arg(long, default_value = "subStream")]
         stream: String,
-        /// Record types to search for (comma-separated). Defaults to all types including AI detections.
-        #[arg(long, default_value = ALL_RECORD_TYPES)]
+        /// Record types to search for (comma-separated). Use --ai-filter to filter by AI tags.
+        #[arg(long, default_value = FILE_SEARCH_RECORD_TYPES)]
         record_type: String,
         /// Filter results by AI detection type (comma-separated, e.g. "people,vehicle,dog_cat").
         /// Only files whose recordType contains at least one of these tags are shown.

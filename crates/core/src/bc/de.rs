@@ -158,24 +158,14 @@ fn bc_modern_msg<'a>(
             context.binary_on_shared(header.msg_num);
             encrypt_region_start = encrypt_pos;
             encrypt_region_len = encrypt_len;
-            // INFO for replay so we can see what the camera sends (encryptPos/encryptLen or not)
-            if header.msg_id == MSG_ID_REPLAY_START || header.msg_id == MSG_ID_REPLAY_START_ALT {
-                log::info!(
-                    "E1 Extension: msg_num={} ext_len={} binaryData=1 encryptPos={:?} encryptLen={:?}",
-                    header.msg_num,
-                    ext_len,
-                    encrypt_pos,
-                    encrypt_len
-                );
-            } else {
-                log::debug!(
-                    "E1 Extension: msg_id={} msg_num={} encryptPos={:?} encryptLen={:?}",
-                    header.msg_id,
-                    header.msg_num,
-                    encrypt_pos,
-                    encrypt_len
-                );
-            }
+            log::debug!(
+                "E1 Extension: msg_id={} msg_num={} ext_len={} encryptPos={:?} encryptLen={:?}",
+                header.msg_id,
+                header.msg_num,
+                ext_len,
+                encrypt_pos,
+                encrypt_len
+            );
         }
         Some(parsed)
     } else {
@@ -238,7 +228,7 @@ fn bc_modern_msg<'a>(
         if (header.msg_id == MSG_ID_REPLAY_START || header.msg_id == MSG_ID_REPLAY_START_ALT)
             && payload_len > 0
         {
-            log::info!(
+            log::debug!(
                 "E1 replay branch: msg_num={} ext_len={} payload_len={} in_binary={} encrypt_region={} is_continuation={}",
                 header.msg_num,
                 ext_len,
@@ -308,7 +298,7 @@ fn bc_modern_msg<'a>(
             let has_00dc = processed_payload_buf.len() >= 4
                 && (processed_payload_buf[..4] == *b"00dc"
                     || (processed_payload_buf.len() > 32 && processed_payload_buf[32..36] == *b"00dc"));
-            log::info!(
+            log::debug!(
                 "E1 replay first/region packet: msg_num={} encrypt_region={:?} payload_len={} processed_len={} has_00dc={} first_32={:02x?}",
                 header.msg_num,
                 encrypt_region_len.map(|l| (encrypt_region_start.unwrap_or(0), l)),

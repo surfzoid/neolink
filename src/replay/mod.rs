@@ -863,7 +863,7 @@ async fn run_replay_or_download(
             .run_task(|cam| {
                 let name = name.to_string();
                 let stream_type = stream_type.to_string();
-                let record_type = cmdline::ALL_RECORD_TYPES.to_string();
+                let record_type = cmdline::FILE_SEARCH_RECORD_TYPES.to_string();
                 Box::pin(async move {
                     cam.get_replay_file_duration_secs(&name, &stream_type, &record_type)
                         .await
@@ -889,7 +889,7 @@ async fn run_replay_or_download(
         .run_task(|cam| {
             let name = name.to_string();
             let stream_type = stream_type.to_string();
-            let record_type = cmdline::ALL_RECORD_TYPES.to_string();
+            let record_type = cmdline::FILE_SEARCH_RECORD_TYPES.to_string();
             Box::pin(async move {
                 let meta = cam.get_replay_file_metadata(&name, &stream_type, &record_type).await.ok().flatten();
                 Ok(meta)
@@ -1229,7 +1229,15 @@ async fn run_download_by_time(
                 break;
             }
             Ok(Ok(_)) => {}
-            Ok(Err(e)) | Err(e) => return Err(e.into()),
+            Ok(Err(e)) | Err(e) => {
+                if frames == 0 && raw_bytes == 0 {
+                    return Err(anyhow::anyhow!(
+                        "Camera rejected download-by-time (MSG 143). This camera may not support \
+                         time-range downloads. Use 'replay download --name <file>' instead."
+                    ));
+                }
+                return Err(e.into());
+            }
         }
     }
 
@@ -1347,7 +1355,7 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
                             let et = et.clone();
                             Box::pin(
                                 async move {
-                                    cam.get_file_list_handle("subStream", cmdline::ALL_RECORD_TYPES, st, et)
+                                    cam.get_file_list_handle("subStream", cmdline::FILE_SEARCH_RECORD_TYPES, st, et)
                                         .await
                                         .context("Could not get file list handle")
                                 },
@@ -1390,7 +1398,7 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
             let start_time = date_to_replay_start(y, m, d);
             let end_time = date_to_replay_end(y, m, d);
 
-            let handle_info = camera
+            let handle_result = camera
                 .run_task(|cam| {
                     let st = start_time.clone();
                     let et = end_time.clone();
@@ -1400,11 +1408,24 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
                         async move {
                             cam.get_file_list_handle(&stream, &record_type, st, et)
                                 .await
-                                .context("Could not get file list handle from camera")
+                                .map_err(|e| anyhow::anyhow!("{}", e))
                         },
                     )
                 })
-                .await?;
+                .await;
+
+            // E1 cameras return 400 when no recordings exist for the date
+            let handle_info = match handle_result {
+                Ok(info) => info,
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("returned code 400") {
+                        println!("No files for this day.");
+                        return Ok(());
+                    }
+                    return Err(e).context("Could not get file list handle from camera");
+                }
+            };
 
             let handle = match handle_info.handle {
                 Some(h) => h,
@@ -1545,10 +1566,27 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
                         let refs: Vec<&str> = ar.iter().map(|s| s.as_str()).collect();
                         cam.alarm_video_search_start(stream_type, &refs, st, et)
                             .await
-                            .context("Alarm video search START failed")
+                            .map_err(|e| anyhow::anyhow!("{}", e))
                     })
                 })
-                .await?;
+                .await;
+
+            // Handle cameras that don't support alarm search (405 = not supported)
+            let result = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("returned code 405") {
+                        println!("This camera does not support alarm video search (MSG 175).");
+                        return Ok(());
+                    }
+                    if msg.contains("returned code 400") {
+                        println!("No alarm events found for this date range.");
+                        return Ok(());
+                    }
+                    return Err(e).context("Alarm video search failed");
+                }
+            };
 
             println!("Alarm search response:");
             println!("  channelId:  {:?}", result.channel_id);
@@ -1670,7 +1708,7 @@ fn print_file_list(files: &[FileInfo]) {
         let name = f.name.as_deref().unwrap_or("—");
         let size_l = f.size_l.unwrap_or(0);
         let size_h = f.size_h.unwrap_or(0);
-        let size_mb = (size_l as u64 + ((size_h as u64) << 32)) / (1024 * 1024);
+        let size_bytes = size_l as u64 + ((size_h as u64) << 32);
         let stream = f.stream_type.as_deref().unwrap_or("—");
         let rec_type = f.record_type.as_deref().unwrap_or("");
         // Split recordType into trigger (md/sched/manual/pir/io) and AI detections
@@ -1684,6 +1722,13 @@ fn print_file_list(files: &[FileInfo]) {
         } else {
             format!("  [AI: {}]", ai.join(", "))
         };
-        println!("  {}  {} MB  {}  {}{}", name, size_mb, stream, rec_type, ai_str);
+        let size_str = if size_bytes == 0 {
+            "— ".to_string()
+        } else if size_bytes < 1024 * 1024 {
+            format!("{} KB", size_bytes / 1024)
+        } else {
+            format!("{} MB", size_bytes / (1024 * 1024))
+        };
+        println!("  {}  {}  {}  {}{}", name, size_str, stream, rec_type, ai_str);
     }
 }

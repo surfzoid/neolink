@@ -950,7 +950,7 @@ impl BcCamera {
                             BcBody::ModernMsg(ModernMsg { payload: Some(BcPayloads::BcXml(_)), .. }) => "xml".to_string(),
                             _ => "other".to_string(),
                         };
-                        log::info!(
+                        log::debug!(
                             "Replay: recv msg_id={} msg_num={} response_code={} body={}",
                             msg.meta.msg_id,
                             msg.meta.msg_num,
@@ -1144,34 +1144,7 @@ impl BcCamera {
                                             break 'recv_loop;
                                         }
                                     }
-                                    // Check if data looks decrypted (starts with XML or known patterns)
-                                    let looks_decrypted = data.starts_with(b"<?xml") 
-                                        || (data.len() > 32 && data[32..].starts_with(b"<?xml"))
-                                        || data.starts_with(b"00dc")  // BcMedia magic
-                                        || (data.len() >= 4 && u32::from_le_bytes([data[0], data[1], data[2], data[3]]) == 0x31303031); // InfoV1 magic
-                                    
                                     let payload = strip_e1_replay_envelope(&data);
-                                    // E1 strip: first two packets at INFO so we can verify first chunk starts with 00dc.
-                                    if packet_count <= 2 {
-                                        let payload_has_00dc = payload.len() >= 4 && payload[..4] == *b"00dc"
-                                            || (payload.len() > 32 && payload[32..36] == *b"00dc");
-                                        log::info!(
-                                            "E1 strip: pkt={} data_len={} payload_len={} looks_decrypted={} payload_has_00dc={} data_first_32={:02x?} payload_first_32={:02x?}",
-                                            packet_count,
-                                            data.len(),
-                                            payload.len(),
-                                            looks_decrypted,
-                                            payload_has_00dc,
-                                            &data[..data.len().min(32)],
-                                            &payload[..payload.len().min(32)]
-                                        );
-                                        if !payload.is_empty() && !payload_has_00dc && !payload.starts_with(b"<?xml") {
-                                            log::warn!(
-                                                "E1 strip: pkt={} payload does not start with 00dc or <?xml — decrypt or envelope may be wrong",
-                                                packet_count
-                                            );
-                                        }
-                                    }
                                     // E1 fix: raw replay (raw_replay_mode=true) often lacks start codes for NAL units (SPS/PPS/IDR/SLICE)
                                     // if the camera sends them as individual messages (common for E1).
                                     // If payload looks like a NAL (starts with valid NAL type) but has no start code, prepend one.
@@ -1206,12 +1179,11 @@ impl BcCamera {
                                     }
                                 }
                             }
-                            if packet_count <= 3 || packet_count % 20 == 0 {
+                            if packet_count <= 3 || packet_count % 200 == 0 {
                                 log::info!(
-                                    "Replay: binary packet {} ({} bytes), total {} bytes",
+                                    "Replay: {} packets, {} KB received",
                                     packet_count,
-                                    data.len(),
-                                    total_binary_bytes
+                                    total_binary_bytes / 1024
                                 );
                             }
                             // Size-based end: some cameras never send 300; stop when we have expected payload (RE: BaichuanDownloader curSize >= fileSize).

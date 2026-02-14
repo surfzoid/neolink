@@ -147,11 +147,7 @@ async fn main() -> Result<()> {
             disk::main(opts, neo_reactor.clone()).await?;
         }
         Some(Command::Replay(opts)) => {
-            eprintln!("[DEBUG] main: about to call replay::main");
-            let result = replay::main(opts, neo_reactor.clone()).await;
-            eprintln!("[DEBUG] main: replay::main returned: {:?}", result.is_ok());
-            result?;
-            eprintln!("[DEBUG] main: after replay::main, about to return Ok(())");
+            replay::main(opts, neo_reactor.clone()).await?;
         }
         Some(Command::Services(opts)) => {
             services::main(opts, neo_reactor.clone()).await?;
