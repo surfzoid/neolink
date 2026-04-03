@@ -941,6 +941,11 @@ async fn run_replay_or_download(
     let mut frames: u64 = 0;
     let mut raw_bytes: u64 = 0;
     let mut raw_replay_buffer: Vec<u8> = Vec::new(); // when writing to file, buffer raw chunks to assemble with mdat
+    // When output is .mp4, collect BcMedia NALs+timestamps for proper MP4 muxing at the end.
+    let mux_to_mp4_output = output.as_ref().map(|p| p.extension().map(|e| e == "mp4").unwrap_or(false)).unwrap_or(false);
+    let mut bcmedia_nals: Vec<Vec<u8>> = Vec::new();
+    let mut bcmedia_timestamps: Vec<u32> = Vec::new();
+    let mut bcmedia_aac: Vec<u8> = Vec::new();
     // Skip first 32 bytes only when replay was started with MSG 5 (app parity; set when we receive ReplayStarted).
     let mut skip_first_32: Option<bool> = None;
     let deadline = duration.map(|secs| Instant::now() + Duration::from_secs(secs));
@@ -969,14 +974,22 @@ async fn run_replay_or_download(
         };
 
         match res {
-            Ok(Ok(BcMedia::Iframe(BcMediaIframe { data, .. })))
-            | Ok(Ok(BcMedia::Pframe(BcMediaPframe { data, .. }))) => {
-                out.write_all(&data).await?;
-                out.flush().await?;
+            Ok(Ok(BcMedia::Iframe(BcMediaIframe { data, microseconds, .. })))
+            | Ok(Ok(BcMedia::Pframe(BcMediaPframe { data, microseconds, .. }))) => {
+                if mux_to_mp4_output {
+                    bcmedia_nals.push(data);
+                    bcmedia_timestamps.push(microseconds);
+                } else {
+                    out.write_all(&data).await?;
+                    out.flush().await?;
+                }
                 frames += 1;
                 if frames <= 5 || frames % 30 == 0 {
                     log::info!("Replay: wrote frame {} to output", frames);
                 }
+            }
+            Ok(Ok(BcMedia::Aac(BcMediaAac { data, .. }))) if mux_to_mp4_output => {
+                bcmedia_aac.extend_from_slice(&data);
             }
             Ok(Ok(BcMedia::ReplayStarted(msg_id))) => {
                 skip_first_32 = Some(msg_id == 5);
@@ -1103,6 +1116,25 @@ async fn run_replay_or_download(
                             println!("Wrote {} bytes (raw container) to {}", raw_replay_buffer.len(), raw_path.display());
                         }
                     }
+                }
+            }
+        } else if !bcmedia_nals.is_empty() {
+            if let Some(p) = &output {
+                if mux_to_mp4(
+                    &bcmedia_nals,
+                    &bcmedia_aac,
+                    0,
+                    &bcmedia_timestamps,
+                    p,
+                    &recording_meta,
+                )
+                .await?
+                {
+                    println!("Wrote {} frames to {} (MP4)", frames, p.display());
+                } else {
+                    let annex_b = annex_b_from_nals(&bcmedia_nals);
+                    tokio::fs::write(p, &annex_b).await.context("Write H.264 fallback")?;
+                    println!("Wrote {} frames to {} (H.264, mux failed)", frames, p.display());
                 }
             }
         } else if frames > 0 {
