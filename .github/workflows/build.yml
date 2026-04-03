@@ -206,6 +206,8 @@ jobs:
     name: Dev Pre-release
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/feature/disk-subcommand' && github.event_name == 'push'
+    permissions:
+      contents: write
     needs:
       - "cross"
       - "native"

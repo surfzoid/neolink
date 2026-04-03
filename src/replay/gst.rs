@@ -175,10 +175,19 @@ pub fn mux_nals_to_mp4(
 
     // Push video NALs with per-frame PTS
     let base_ts = timestamps_us.first().copied().unwrap_or(0);
+    // Compute average frame duration for use on the last frame
+    let avg_frame_dur_us: u32 = if timestamps_us.len() > 1 {
+        (timestamps_us.last().unwrap().wrapping_sub(*timestamps_us.first().unwrap()))
+            / (timestamps_us.len() as u32 - 1)
+    } else {
+        33333 // ~30fps fallback
+    };
     for (i, nal) in nals.iter().enumerate() {
         let ts_us = timestamps_us.get(i).copied().unwrap_or(0);
         let pts_us = ts_us.wrapping_sub(base_ts) as u64;
         let pts_ns = pts_us * 1000;
+        let next_ts_us = timestamps_us.get(i + 1).copied().unwrap_or_else(|| ts_us.wrapping_add(avg_frame_dur_us));
+        let dur_ns = (next_ts_us.wrapping_sub(ts_us) as u64) * 1000;
 
         // Ensure Annex B start code
         let has_start = (nal.len() >= 4 && nal[0..4] == [0, 0, 0, 1])
@@ -189,6 +198,7 @@ pub fn mux_nals_to_mp4(
         {
             let buf_ref = buf.get_mut().unwrap();
             buf_ref.set_pts(ClockTime::from_nseconds(pts_ns));
+            buf_ref.set_duration(ClockTime::from_nseconds(dur_ns));
             let mut map = buf_ref.map_writable().context("video buffer map")?;
             if has_start {
                 map.copy_from_slice(nal);
