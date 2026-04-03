@@ -272,18 +272,19 @@ fn bc_modern_msg<'a>(
                 payload_buf.to_vec()
             }
         } else if in_binary
+            && header.payload_offset.is_some()
             && matches!(
                 context.get_encrypted(),
                 EncryptionProtocol::Aes { .. } | EncryptionProtocol::FullAes { .. }
             )
         {
-            // SDK (handleResponseV20): for binary messages (MSG 3/5/8), encryptLen
-            // controls how many bytes are decrypted. When Extension XML has no
-            // encryptLen field (or ext_len=0), encryptLen=0 → `0 < 0` is false →
-            // decrypt is skipped. Only the Extension XML is decrypted (above),
-            // the binary payload is plaintext.
+            // SDK (handleResponseV20): only applies to E1/v2 cameras that send a payload_offset
+            // (24-byte header). For these cameras, when Extension XML has no encryptLen field,
+            // encryptLen=0 → `0 < 0` is false → binary payload is plaintext.
+            // Older cameras (e.g. Argus 2) have no payload_offset and fully encrypt the binary
+            // payload; they fall through to the standard decrypt below.
             log::debug!(
-                "E1 replay: in_binary msg_id={} but no encryptLen, passing binary as plaintext (SDK: encryptLen=0)",
+                "E1 replay: in_binary msg_id={} but no encryptLen (v2/E1 camera), passing binary as plaintext (SDK: encryptLen=0)",
                 header.msg_id
             );
             payload_buf.to_vec()

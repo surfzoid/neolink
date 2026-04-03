@@ -38,6 +38,22 @@ const DESKTOP_PATH_MAX: usize = 0x3ff;
 /// E1 (Extension 1.1) per-packet envelope: optional 32-byte prefix then Extension XML, then decrypted payload.
 const E1_REPLAY_PREFIX_LEN: usize = 32;
 
+/// Returns true if `data` begins with a known BcMedia frame magic (INFO, IFRAME, PFRAME, AAC).
+/// Used to distinguish BcMedia streams (non-E1 cameras) from container formats when detecting replay mode.
+fn is_bcmedia_start(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let magic = u32::from_le_bytes(data[0..4].try_into().unwrap());
+    matches!(magic,
+        0x31303031 | // INFO_V1
+        0x32303031 | // INFO_V2
+        0x63643030..=0x63643039 | // IFRAME range
+        0x63643130..=0x63643139 | // PFRAME range
+        0x62773530   // AAC
+    )
+}
+
 /// Strip E1 replay envelope from a packet body.
 /// Layouts: (1) 32 bytes + `<?xml ...></Extension>[\r]\n` + payload, or (2) `<?xml ...></Extension>...` + payload.
 /// Also supports any closing after `</Extension>` (e.g. `</xml>`); uses first `00dc` as fallback for media start.
@@ -1131,7 +1147,10 @@ impl BcCamera {
                                 // Some cameras (e.g. E1 with MSG 5) send MP4 that doesn't start with ftyp after
                                 // decrypt, or use a different container; continuation packets can have
                                 // response_code != 200. Treat as raw replay to avoid codec Nom errors and connection loss.
-                                if packet_count == 2 && data.len() >= 8 && data[4..8] != *b"ftyp" && data.len() > 512 {
+                                // Exception: don't trigger for BcMedia streams (non-E1 cameras like Argus 2).
+                                if packet_count == 2 && data.len() >= 8 && data[4..8] != *b"ftyp" && data.len() > 512
+                                    && !is_bcmedia_start(data)
+                                {
                                     raw_replay_mode = true;
                                     log::info!(
                                         "Replay: packet 2 not ftyp (decrypted: {:02x?}), treating as container/raw",
