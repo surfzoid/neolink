@@ -215,11 +215,13 @@ fn bc_modern_msg<'a>(
         };
 
         // Determine if this packet needs payload decryption.
-        // SDK behavior (handleResponseV20): continuation packets (ext_len=0, in_bin_mode)
-        // have encryptLen=0xFFFFFFFF (unset), so the check `0 < (int)encryptLen` fails
-        // and decryption is skipped — the binary data is already plaintext.
-        // Only decrypt when: (a) encryptPos/encryptLen are set from this packet's Extension,
-        // or (b) this is the first binary packet (ext_len > 0, in_binary set by this packet).
+        // SDK behavior (handleResponseV20): when encryptLen is absent from the Extension,
+        // it stays at init value 0xFFFFFFFF; cast to signed = -1; the check
+        // `0 < (int)encryptLen` fails → decrypt is skipped → payload is plaintext.
+        // This applies to BOTH:
+        //   (a) continuation packets (ext_len=0, no Extension at all), AND
+        //   (b) packets with Extension containing binaryData=1 but no encryptLen tag.
+        // Only decrypt when encryptLen is explicitly present and > 0.
         let is_continuation_binary = ext_len == 0
             && encrypt_region_len.is_none()
             && context.in_bin_mode.borrow().contains(&(header.msg_num as u16));
@@ -271,12 +273,17 @@ fn bc_modern_msg<'a>(
                 );
                 payload_buf.to_vec()
             }
-        } else if false {
-            // (removed: was an incorrect AES plaintext bypass for in_binary+no-encryptLen;
-            // payload_offset is forced Some for all cameras on MSG 5 so cannot distinguish
-            // E1 from Argus 2. E1 packets always carry explicit encryptLen → handled above.
-            // Cameras without encryptLen need full AES decrypt → fall through to else below.)
-            unreachable!()
+        } else if in_binary && encrypt_region_len.is_none() {
+            // SDK: Extension has binaryData=1 but no encryptLen → absent encryptLen
+            // defaults to 0xFFFFFFFF, (int)0xFFFFFFFF = -1, `0 < -1` fails → plaintext.
+            // E1 sends large video continuation packets this way (only the first packet
+            // of a BcMedia group carries explicit encryptLen for the encrypted header region).
+            log::debug!(
+                "E1 replay: binary packet with no encryptLen msg_num={} len={} — passing as plaintext",
+                header.msg_num,
+                payload_buf.len()
+            );
+            payload_buf.to_vec()
         } else {
             encryption_protocol.decrypt(header.channel_id as u32, payload_buf)
         };
@@ -327,7 +334,7 @@ fn bc_modern_msg<'a>(
                         Some(BcPayloads::Binary(payload_buf.to_vec()))
                     }
                     _ => {
-                        // FullAes without encryptLen, or BCEncrypt: apply full decrypt.
+                        // FullAes without encryptLen (plaintext passthrough), or BCEncrypt.
                         Some(BcPayloads::Binary(processed_payload_buf.to_vec()))
                     }
                 }
