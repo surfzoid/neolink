@@ -318,8 +318,16 @@ fn bc_modern_msg<'a>(
                     (EncryptionProtocol::Unencrypted, _) => {
                         Some(BcPayloads::Binary(payload_buf.to_vec()))
                     }
+                    (EncryptionProtocol::Aes { .. }, None) => {
+                        // Aes cameras encrypt control messages only; binary media streams are plaintext.
+                        // Applying AES decrypt to plaintext BcMedia produces garbled output (e.g. Argus 2).
+                        log::debug!(
+                            "Aes (non-FullAes) camera: binary payload without explicit encryptLen — passing as plaintext (media not encrypted)"
+                        );
+                        Some(BcPayloads::Binary(payload_buf.to_vec()))
+                    }
                     _ => {
-                        // Session is encrypted (BCEncrypt or Aes): use decrypted payload for replay/other binary.
+                        // FullAes without encryptLen, or BCEncrypt: apply full decrypt.
                         Some(BcPayloads::Binary(processed_payload_buf.to_vec()))
                     }
                 }
