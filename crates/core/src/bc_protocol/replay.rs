@@ -152,6 +152,26 @@ pub fn build_download_by_time_payload(
     out
 }
 
+/// BC_DOWNLOAD_BY_NAME_INFO size (0xD48 = 3400 bytes). Layout from Ghidra analysis of
+/// BaichuanDownloader::downloadFileByName in libBCSDKWrapper.so (Android SDK).
+pub const BC_DOWNLOAD_BY_NAME_INFO_SIZE: usize = 0xD48;
+const FILE_NAME_OFFSET: usize = 0x24; // cFileName at +0x24 (SDK_LOG confirms: "download file with name: %s", param_2 + 0x24)
+const FILE_NAME_MAX: usize = 0x100; // 256 bytes (conservative; 0x500 bytes available between 0x24 and 0x524)
+
+/// Build the 0xD48-byte BC_DOWNLOAD_BY_NAME_INFO payload for download-file-by-name (MSG 8).
+/// Layout (from Ghidra): iChannel (4), cUID (32, zeroed), cFileName (256, at 0x24), rest zeroed.
+/// The camera reads channel + filename and streams the raw file back. Output path at 0x524 is
+/// SDK-internal (local filesystem path) and not meaningful to send; left zeroed.
+pub fn build_download_by_name_payload(channel_id: u8, file_name: &str) -> Vec<u8> {
+    let mut out = vec![0u8; BC_DOWNLOAD_BY_NAME_INFO_SIZE];
+    out[0..4].copy_from_slice(&(channel_id as u32).to_le_bytes());
+    // cUID at offset 4 (32 bytes, zeroed — same pattern as build_download_by_time_payload)
+    let name_bytes = file_name.as_bytes();
+    let name_len = name_bytes.len().min(FILE_NAME_MAX - 1); // reserve 1 byte for null terminator
+    out[FILE_NAME_OFFSET..FILE_NAME_OFFSET + name_len].copy_from_slice(&name_bytes[..name_len]);
+    out
+}
+
 /// Duration in seconds between two ReplayDateTimes (end − start). Returns None if invalid or negative.
 pub fn replay_datetime_duration_secs(start: &ReplayDateTime, end: &ReplayDateTime) -> Option<u64> {
     let sm = Month::try_from(start.month).ok()?;
@@ -1450,6 +1470,203 @@ impl BcCamera {
             let stop_msg = Bc {
                 meta: BcMeta {
                     msg_id: MSG_ID_DOWNLOAD_STOP,
+                    channel_id,
+                    msg_num: stop_msg_num,
+                    stream_type: 0,
+                    response_code: 0,
+                    class: 0x6414,
+                },
+                body: BcBody::ModernMsg(ModernMsg {
+                    extension: None,
+                    payload: None,
+                }),
+            };
+            let _ = sub_stop.send(stop_msg).await;
+            Ok(())
+        });
+
+        Ok(StreamData::from_parts(handle, rx, abort_handle))
+    }
+
+    /// Start direct file download by name (MSG 8, NET_DOWNLOAD_V20).
+    ///
+    /// Sends a binary `BC_DOWNLOAD_BY_NAME_INFO` payload (0xD48 bytes) to the camera.
+    /// The camera streams the raw file content back (typically MP4). Stream ends on
+    /// response 300 or 331. Stop is sent as MSG 9 (NET_DOWNLOAD_STOP_V20) when stream drops.
+    ///
+    /// Layout confirmed from Android SDK Ghidra analysis:
+    ///   offset 0x00: iChannel (uint32_t)
+    ///   offset 0x04: cUID (32 bytes, zeroed)
+    ///   offset 0x24: cFileName (null-terminated C string, file name from file list)
+    ///   total: 0xD48 = 3400 bytes (remaining fields zeroed)
+    pub async fn start_download_file_by_name(
+        &self,
+        file_name: &str,
+        strict: bool,
+        buffer_size: usize,
+        dump_replay: Option<std::path::PathBuf>,
+        dump_replay_limit: Option<usize>,
+    ) -> Result<StreamData> {
+        let connection = self.get_connection();
+        let start_msg_num = self.new_message_num();
+        let stop_msg_num = self.new_message_num();
+        let channel_id = self.channel_id;
+        let payload = build_download_by_name_payload(channel_id, file_name);
+        let buffer_size = if buffer_size == 0 { 100 } else { buffer_size };
+        const DEFAULT_DUMP_LIMIT: usize = 131072;
+        let dump_limit = dump_replay_limit.unwrap_or(DEFAULT_DUMP_LIMIT);
+        let file_name = file_name.to_string();
+        let (tx, rx) = channel(buffer_size);
+        let abort_handle = CancellationToken::new();
+        let abort_handle_thread = abort_handle.clone();
+
+        let handle = task::spawn(async move {
+            let mut dump_file = None::<(tokio::fs::File, Option<usize>)>;
+            if let Some(ref p) = dump_replay {
+                if let Ok(f) = tokio::fs::File::create(p).await {
+                    let limit_str = if dump_limit == 0 {
+                        "full stream".to_string()
+                    } else {
+                        format!("first {} bytes", dump_limit)
+                    };
+                    log::info!(
+                        "DownloadByName: will dump {} to {}",
+                        limit_str,
+                        p.display()
+                    );
+                    dump_file = Some((f, if dump_limit == 0 { None } else { Some(dump_limit) }));
+                }
+            }
+            let mut sub = connection
+                .subscribe(MSG_ID_DOWNLOAD_FILE_BY_NAME, start_msg_num)
+                .await?;
+            let msg = Bc {
+                meta: BcMeta {
+                    msg_id: MSG_ID_DOWNLOAD_FILE_BY_NAME,
+                    channel_id,
+                    msg_num: start_msg_num,
+                    stream_type: 0,
+                    response_code: 0,
+                    class: 0x6414,
+                },
+                body: BcBody::ModernMsg(ModernMsg {
+                    extension: None,
+                    payload: Some(BcPayloads::Binary(payload)),
+                }),
+            };
+            log::info!("DownloadByName: sending MSG 8 for file '{}'", file_name);
+            sub.send(msg).await?;
+
+            let mut first = true;
+            let mut codec = BcMediaCodex::new(strict);
+            let mut buf = BytesMut::new();
+            let mut raw_replay_mode = false;
+            let mut packet_count = 0u32;
+            let mut total_binary_bytes = 0usize;
+            let mut accepted_stream_response_codes: HashSet<u16> = HashSet::new();
+            'recv_loop: loop {
+                tokio::select! {
+                    _ = abort_handle_thread.cancelled() => break 'recv_loop,
+                    msg_res = sub.recv() => {
+                        let msg = match msg_res {
+                            Err(e) => {
+                                log::info!(
+                                    "DownloadByName stream ended: recv error ({} packets, {} bytes): {:?}",
+                                    packet_count, total_binary_bytes, e
+                                );
+                                return Err(e);
+                            }
+                            Ok(m) => m,
+                        };
+                        if first {
+                            first = false;
+                            if msg.meta.response_code != 200 {
+                                log::info!(
+                                    "DownloadByName rejected: response_code={} (camera may not support MSG 8 download-by-name)",
+                                    msg.meta.response_code
+                                );
+                                return Err(Error::UnintelligibleReply {
+                                    _reply: std::sync::Arc::new(Box::new(msg)),
+                                    why: "Camera did not accept download-file-by-name (MSG 8)",
+                                });
+                            }
+                            accepted_stream_response_codes.insert(200);
+                            log::info!("DownloadByName: camera accepted (200), streaming file...");
+                        } else if msg.meta.response_code == 300 || msg.meta.response_code == 331 {
+                            log::info!(
+                                "DownloadByName: response {} (end), file complete ({} packets, {} bytes)",
+                                msg.meta.response_code, packet_count, total_binary_bytes
+                            );
+                            let _ = tx.send(Ok(BcMedia::StreamEnd)).await;
+                            break 'recv_loop;
+                        }
+                        if let BcBody::ModernMsg(ModernMsg { payload: Some(BcPayloads::Binary(data)), .. }) = &msg.body {
+                            let code = msg.meta.response_code;
+                            if !accepted_stream_response_codes.contains(&code) {
+                                if code != 300 && code != 331 {
+                                    accepted_stream_response_codes.insert(code);
+                                    log::debug!("DownloadByName: accepting streaming response_code {} (added to accepted set)", code);
+                                }
+                            }
+                            if accepted_stream_response_codes.contains(&code) {
+                                packet_count += 1;
+                                total_binary_bytes += data.len();
+                                if let Some((ref mut f, ref mut remaining)) = dump_file {
+                                    let to_write = if let Some(r) = remaining {
+                                        data.len().min(*r)
+                                    } else {
+                                        data.len()
+                                    };
+                                    if to_write > 0 {
+                                        let _ = f.write_all(&data[..to_write]).await;
+                                        if let Some(ref mut r) = remaining {
+                                            *r = r.saturating_sub(to_write);
+                                            if *r == 0 {
+                                                log::info!("DownloadByName: reached dump limit, closed dump file");
+                                                dump_file = None;
+                                            }
+                                        }
+                                    }
+                                }
+                                if packet_count == 1 {
+                                    const REPLAY_HEADER_LEN: usize = 32;
+                                    if data.len() == REPLAY_HEADER_LEN {
+                                        log::info!("DownloadByName: skipping 32-byte stream info header");
+                                        continue;
+                                    }
+                                }
+                                if packet_count == 2 && data.len() >= 8 && data[4..8] == *b"ftyp" {
+                                    raw_replay_mode = true;
+                                    log::info!("DownloadByName: stream is raw MP4 (ftyp), forwarding bytes directly");
+                                }
+                                if raw_replay_mode {
+                                    let _ = tx.send(Ok(BcMedia::RawReplayChunk(data.clone()))).await;
+                                } else {
+                                    buf.extend_from_slice(data);
+                                    loop {
+                                        match codec.decode(&mut buf) {
+                                            Ok(Some(frame)) => {
+                                                if tx.send(Ok(frame)).await.is_err() {
+                                                    break 'recv_loop;
+                                                }
+                                            }
+                                            Ok(None) => break,
+                                            Err(_e) => break,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((ref mut f, _)) = dump_file {
+                let _ = f.flush().await;
+            }
+            let sub_stop = connection.subscribe(MSG_ID_DOWNLOAD_FILE_STOP, stop_msg_num).await?;
+            let stop_msg = Bc {
+                meta: BcMeta {
+                    msg_id: MSG_ID_DOWNLOAD_FILE_STOP,
                     channel_id,
                     msg_num: stop_msg_num,
                     stream_type: 0,

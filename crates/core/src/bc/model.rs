@@ -111,8 +111,15 @@ pub const MSG_ID_HDD_INFO_LIST: u32 = 102;
 pub const MSG_ID_HDD_INIT_LIST: u32 = 103;
 /// Replay: start playback (FileInfoList / BCMedia stream)
 pub const MSG_ID_REPLAY_START: u32 = 5;
-/// Replay: alternate start (FUN_18017d710 iVar3==1; some cameras e.g. E1 may use this)
+/// Replay: alternate start (some cameras accept this instead of MSG 5 for replay)
+/// NOTE: This is the same wire ID as MSG_ID_DOWNLOAD_FILE_BY_NAME (NET_DOWNLOAD_V20 in Android SDK).
+/// The camera dispatches on payload format: XML FileInfoList = replay; binary BC_DOWNLOAD_BY_NAME_INFO = file download.
 pub const MSG_ID_REPLAY_START_ALT: u32 = 8;
+/// Download a specific SD card file by name (NET_DOWNLOAD_V20, binary BC_DOWNLOAD_BY_NAME_INFO payload 0xD48 bytes).
+/// Confirmed from Android SDK Ghidra analysis: table entry key=8, BaichuanDownloader::downloadFileByName sends MSG 8.
+pub const MSG_ID_DOWNLOAD_FILE_BY_NAME: u32 = 8;
+/// Stop download-file-by-name (NET_DOWNLOAD_STOP_V20, key=9). No payload.
+pub const MSG_ID_DOWNLOAD_FILE_STOP: u32 = 9;
 /// Replay: stop playback
 pub const MSG_ID_REPLAY_STOP: u32 = 7;
 /// Replay: file details by name (FileInfoList)

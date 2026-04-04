@@ -89,6 +89,24 @@ pub enum ReplayCommand {
         #[arg(long)]
         dump_replay_limit: Option<usize>,
     },
+    /// Download a specific SD card file directly by name (MSG 8, NET_DOWNLOAD_V20).
+    /// Requests the raw MP4 file from the camera without BcMedia re-encoding.
+    /// Uses a binary BC_DOWNLOAD_BY_NAME_INFO payload; camera streams the file back.
+    /// Faster than 'download' for cameras that support MSG 8.
+    DownloadByName {
+        /// File name from "replay files" output (e.g. "01_20240204120000")
+        #[arg(long)]
+        name: String,
+        /// Output path for the downloaded file (e.g. out.mp4)
+        #[arg(long)]
+        output: std::path::PathBuf,
+        /// Debug: write raw stream to this file for inspection
+        #[arg(long)]
+        dump_replay: Option<std::path::PathBuf>,
+        /// Max bytes to write to --dump-replay (default 131072). Use 0 for full stream.
+        #[arg(long)]
+        dump_replay_limit: Option<usize>,
+    },
     /// Download by time range (MSG 143; camera sends response 331 at end). Use when you want a date range instead of a file name.
     DownloadByTime {
         /// Start date (YYYY-MM-DD); time 00:00:00

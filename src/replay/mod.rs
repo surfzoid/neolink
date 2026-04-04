@@ -1347,6 +1347,149 @@ async fn run_download_by_time(
     Ok(())
 }
 
+/// Download a specific SD card file by name (MSG 8, NET_DOWNLOAD_V20).
+/// Camera streams the raw MP4 directly — no BcMedia re-encoding needed.
+async fn run_download_file_by_name(
+    camera: &crate::common::NeoInstance,
+    file_name: &str,
+    output: std::path::PathBuf,
+    dump_replay: Option<std::path::PathBuf>,
+    dump_replay_limit: Option<usize>,
+) -> Result<()> {
+    log::info!("DownloadByName: requesting file '{}' via MSG 8", file_name);
+
+    let mut stream = camera
+        .run_task(|cam| {
+            let name = file_name.to_string();
+            let dump_path = dump_replay.clone();
+            let dump_limit = dump_replay_limit;
+            Box::pin(async move {
+                cam.start_download_file_by_name(&name, false, 100, dump_path, dump_limit)
+                    .await
+                    .context("Could not start download-file-by-name on camera")
+            })
+        })
+        .await?;
+
+    let mut raw_bytes: u64 = 0;
+    let mut raw_replay_buffer: Vec<u8> = Vec::new();
+
+    loop {
+        let res = tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("DownloadByName: Ctrl+C received, writing partial file.");
+                break;
+            }
+            r = stream.get_data() => r,
+        };
+
+        match res {
+            Ok(Ok(BcMedia::RawReplayChunk(data))) => {
+                raw_bytes += data.len() as u64;
+                raw_replay_buffer.extend_from_slice(&data);
+                if (raw_bytes > 32 && raw_bytes <= 1024) || raw_bytes % (1024 * 1024) == 0 {
+                    log::info!("DownloadByName: received {} bytes total", raw_bytes);
+                }
+            }
+            Ok(Ok(BcMedia::Iframe(BcMediaIframe { data, .. })))
+            | Ok(Ok(BcMedia::Pframe(BcMediaPframe { data, .. }))) => {
+                // BcMedia path (unexpected for direct download but handle gracefully)
+                raw_replay_buffer.extend_from_slice(&data);
+                raw_bytes += data.len() as u64;
+            }
+            Ok(Ok(BcMedia::StreamEnd)) => {
+                log::info!("DownloadByName: camera signalled end of file ({} bytes).", raw_bytes);
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) | Err(e) => {
+                if raw_bytes == 0 {
+                    return Err(anyhow::anyhow!(
+                        "Camera rejected download-by-name (MSG 8): {}. \
+                         This camera may not support direct file download. \
+                         Try 'replay download --name {}' instead.",
+                        e, file_name
+                    ));
+                }
+                log::warn!("DownloadByName: stream error after {} bytes: {:?}", raw_bytes, e);
+                break;
+            }
+        }
+    }
+
+    drop(stream); // sends MSG 9 stop
+
+    if raw_replay_buffer.is_empty() {
+        return Err(anyhow::anyhow!("DownloadByName: no data received from camera"));
+    }
+
+    let stream = stream_for_mp4_assembly(&raw_replay_buffer, None);
+    let to_try: &[u8] = slice_from_ftyp(stream).unwrap_or(stream);
+    match assemble_mp4_with_mdat(to_try) {
+        Ok(assembled) => {
+            tokio::fs::write(&output, &assembled).await.context("Write assembled MP4")?;
+            patch_e1_avcc_if_needed(&output).context("Patch E1 avcC")?;
+            patch_avc1_colour_if_needed(&output).context("Patch avc1 colour")?;
+            println!(
+                "Wrote {} bytes (assembled MP4) to {}",
+                assembled.len(),
+                output.display()
+            );
+        }
+        Err(_) => {
+            // Not an MP4 container; try BcMedia decode
+            let stream_to_decode = find_bcmedia_magic_offset(stream)
+                .map(|off| &stream[off..])
+                .unwrap_or(stream);
+            if let Some(BcMediaDecoded { nals, fps, timestamps_us, aac_data }) =
+                try_decode_bcmedia_nals(stream_to_decode)
+            {
+                let recording_meta = RecordingMeta {
+                    record_type: None,
+                    start_time: None,
+                    end_time: None,
+                    camera_name: None,
+                };
+                let is_mp4 = output.extension().map(|e| e == "mp4").unwrap_or(false);
+                if is_mp4 {
+                    if mux_to_mp4(&nals, &aac_data, fps, &timestamps_us, &output, &recording_meta)
+                        .await?
+                    {
+                        println!(
+                            "Parsed BcMedia and muxed to {}",
+                            output.display()
+                        );
+                    } else {
+                        let annex_b = annex_b_from_nals(&nals);
+                        tokio::fs::write(&output, &annex_b).await.context("Write H.264")?;
+                        println!("Wrote {} bytes (H.264) to {}", annex_b.len(), output.display());
+                    }
+                } else {
+                    let annex_b = annex_b_from_nals(&nals);
+                    tokio::fs::write(&output, &annex_b).await.context("Write H.264")?;
+                    println!("Wrote {} bytes (H.264 Annex B) to {}", annex_b.len(), output.display());
+                }
+            } else {
+                // Unknown format — save raw for inspection
+                let raw_path = if output.extension().map(|e| e == "mp4").unwrap_or(false) {
+                    output.with_extension("raw.bin")
+                } else {
+                    output.clone()
+                };
+                tokio::fs::write(&raw_path, &raw_replay_buffer)
+                    .await
+                    .context("Write raw download")?;
+                println!(
+                    "Wrote {} bytes (raw, unknown format) to {} for inspection",
+                    raw_replay_buffer.len(),
+                    raw_path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Entry point for the replay subcommand
 pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
     let camera = reactor.get(&opt.camera).await?;
@@ -1680,6 +1823,21 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
                     }
                 }
             }
+        }
+        cmdline::ReplayCommand::DownloadByName {
+            name,
+            output,
+            dump_replay,
+            dump_replay_limit,
+        } => {
+            run_download_file_by_name(
+                &camera,
+                &name,
+                output,
+                dump_replay,
+                dump_replay_limit,
+            )
+            .await?;
         }
         cmdline::ReplayCommand::Stop { name } => {
             camera
