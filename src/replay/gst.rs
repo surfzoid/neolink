@@ -41,6 +41,7 @@ pub fn mux_nals_to_mp4(
     aac_data: &[u8],
     output_path: &Path,
     metadata: &Mp4Metadata,
+    is_h265: bool,
 ) -> Result<()> {
     gstreamer::init().context("GStreamer init")?;
 
@@ -52,9 +53,10 @@ pub fn mux_nals_to_mp4(
         .context("create video appsrc")?
         .downcast::<AppSrc>()
         .map_err(|_| anyhow::anyhow!("appsrc downcast"))?;
-    let h264parse = gstreamer::ElementFactory::make("h264parse")
+    let video_parse_name = if is_h265 { "h265parse" } else { "h264parse" };
+    let h264parse = gstreamer::ElementFactory::make(video_parse_name)
         .build()
-        .context("create h264parse")?;
+        .context("create video parse element")?;
     let mp4mux = gstreamer::ElementFactory::make("mp4mux")
         .build()
         .context("create mp4mux")?;
@@ -70,7 +72,8 @@ pub fn mux_nals_to_mp4(
     h264parse.link(&mp4mux)?;
     mp4mux.link(&filesink)?;
 
-    let caps = Caps::builder("video/x-h264")
+    let video_media_type = if is_h265 { "video/x-h265" } else { "video/x-h264" };
+    let caps = Caps::builder(video_media_type)
         .field("stream-format", "byte-stream")
         .build();
     video_src.set_caps(Some(&caps));
@@ -283,8 +286,9 @@ pub fn mux_nals_to_mp4(
 
     pipeline.set_state(State::Null)?;
     log::info!(
-        "Replay GStreamer: muxed {} video frames + audio to {}",
+        "Replay GStreamer: muxed {} {} frames + audio to {}",
         nals.len(),
+        if is_h265 { "H.265" } else { "H.264" },
         output_path.display()
     );
     Ok(())
