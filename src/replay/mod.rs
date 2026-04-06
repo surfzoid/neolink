@@ -1141,6 +1141,14 @@ async fn run_replay_or_download(
             out.flush().await?;
             out.shutdown().await?;
             println!("Wrote {} frames to {}", frames, p.display());
+        } else {
+            // No data received — delete the empty file that was created upfront.
+            drop(out);
+            let _ = tokio::fs::remove_file(p).await;
+            return Err(anyhow::anyhow!(
+                "No data received from camera (0 frames, 0 bytes). Output file removed. \
+                 The camera may be busy or the file may no longer exist — try again."
+            ));
         }
     } else {
         out.flush().await?;

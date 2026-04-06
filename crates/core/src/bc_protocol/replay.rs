@@ -1034,6 +1034,7 @@ impl BcCamera {
                                 log::info!(
                                     "Replay: camera returned 400 for MSG 8, trying desktop replay (0x17d)..."
                                 );
+                                msg_id = MSG_ID_REPLAY_DESKTOP; // prevent re-entry if 0x17d also returns 400
                                 drop(sub);
                                 let sub_desktop = connection
                                     .subscribe(MSG_ID_REPLAY_DESKTOP, start_msg_num)
