@@ -82,6 +82,50 @@ fn is_likely_valid_h265_nal(payload: &[u8]) -> bool {
     nal_type <= 47
 }
 
+/// Inspect actual NAL bytes to determine whether the stream is H.264 or H.265,
+/// regardless of what the BcMedia header's video_type field claims.
+///
+/// Some cameras (e.g. Argus PT) send H.265 data but label it "H264" in the BcMedia header.
+/// Detection is based on NAL unit type after start codes:
+/// - H.265 VPS(32)/SPS(33)/PPS(34): first byte = 0x40/0x42/0x44 — H.265-specific, cannot appear in H.264
+/// - H.264 SPS(7)/PPS(8)/IDR(5): first byte = 0x67/0x68/0x65
+///
+/// Returns Some(codec) if a distinctive NAL is found, None if indeterminate.
+fn detect_codec_from_nal_bytes(data: &[u8]) -> Option<neolink_core::bcmedia::model::VideoType> {
+    use neolink_core::bcmedia::model::VideoType;
+    let mut i = 0;
+    while i < data.len() {
+        let nal_start = if data[i..].starts_with(&[0, 0, 0, 1]) {
+            i + 4
+        } else if data[i..].starts_with(&[0, 0, 1]) {
+            i + 3
+        } else {
+            i += 1;
+            continue;
+        };
+        if nal_start >= data.len() {
+            break;
+        }
+        let byte0 = data[nal_start];
+        if byte0 >> 7 != 0 {
+            i = nal_start + 1;
+            continue;
+        }
+        let h265_type = (byte0 >> 1) & 0x3F;
+        if matches!(h265_type, 32..=34) {
+            // VPS/SPS/PPS — only possible in H.265
+            return Some(VideoType::H265);
+        }
+        let h264_type = byte0 & 0x1F;
+        if matches!(h264_type, 5 | 7 | 8) {
+            // IDR/SPS/PPS — confirms H.264
+            return Some(VideoType::H264);
+        }
+        i = nal_start + 1;
+    }
+    None
+}
+
 /// Max bytes to advance on Incomplete without finding any NAL. Prevents hanging on garbage/ciphertext (e.g. undecrypted replay).
 const BCMEDIA_RESYNC_CAP: usize = 128 * 1024;
 
@@ -117,22 +161,33 @@ fn try_decode_bcmedia_nals(stream: &[u8]) -> Option<BcMediaDecoded> {
     loop {
         match codec.decode(&mut buf) {
             Ok(Some(BcMedia::Iframe(BcMediaIframe { data, microseconds, video_type, .. }))) => {
-                let valid = match video_type {
+                if detected_codec.is_none() {
+                    // Override header claim with NAL-level detection — some cameras (e.g. Argus PT)
+                    // label H.265 streams as "H264" in BcMedia headers.
+                    let actual = detect_codec_from_nal_bytes(&data).unwrap_or(video_type);
+                    if actual != video_type {
+                        log::warn!(
+                            "Replay: BcMedia header says {:?} but NAL bytes indicate {:?} — using detected codec",
+                            video_type, actual
+                        );
+                    }
+                    detected_codec = Some(actual);
+                    log::info!("Replay: BcMedia stream codec = {:?} (from first IFrame)", actual);
+                }
+                let effective_codec = detected_codec.unwrap_or(video_type);
+                let valid = match effective_codec {
                     VideoType::H265 => is_likely_valid_h265_nal(&data),
                     VideoType::H264 => is_likely_valid_h264_nal(&data),
                 };
                 if valid {
-                    if detected_codec.is_none() {
-                        detected_codec = Some(video_type);
-                        log::info!("Replay: BcMedia stream codec = {:?} (from first IFrame)", video_type);
-                    }
                     nals.push(data);
                     timestamps_us.push(microseconds);
                     bytes_advanced_without_nal = 0;
                 }
             }
             Ok(Some(BcMedia::Pframe(BcMediaPframe { data, microseconds, video_type, .. }))) => {
-                let valid = match video_type {
+                let effective_codec = detected_codec.unwrap_or(video_type);
+                let valid = match effective_codec {
                     VideoType::H265 => is_likely_valid_h265_nal(&data),
                     VideoType::H264 => is_likely_valid_h264_nal(&data),
                 };
@@ -1023,8 +1078,16 @@ async fn run_replay_or_download(
             | Ok(Ok(BcMedia::Pframe(BcMediaPframe { data, microseconds, video_type, .. }))) => {
                 if mux_to_mp4_output {
                     if frames == 0 {
-                        bcmedia_codec = video_type;
-                        log::info!("Replay: stream codec = {:?}", video_type);
+                        // Override header claim with NAL-level detection (e.g. Argus PT labels H.265 as "H264")
+                        let actual = detect_codec_from_nal_bytes(&data).unwrap_or(video_type);
+                        if actual != video_type {
+                            log::warn!(
+                                "Replay: BcMedia header says {:?} but NAL bytes indicate {:?} — using detected codec",
+                                video_type, actual
+                            );
+                        }
+                        bcmedia_codec = actual;
+                        log::info!("Replay: stream codec = {:?}", actual);
                     }
                     bcmedia_nals.push(data);
                     bcmedia_timestamps.push(microseconds);
