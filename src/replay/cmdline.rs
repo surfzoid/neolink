@@ -34,9 +34,9 @@ pub enum ReplayCommand {
         /// Date (YYYY-MM-DD)
         #[arg(long)]
         date: String,
-        /// Stream type: mainStream or subStream
-        #[arg(long, default_value = "subStream")]
-        stream: String,
+        /// Stream type: mainStream or subStream. If omitted, lists files for both streams.
+        #[arg(long)]
+        stream: Option<String>,
         /// Record types to search for (comma-separated). Use --ai-filter to filter by AI tags.
         #[arg(long, default_value = FILE_SEARCH_RECORD_TYPES)]
         record_type: String,

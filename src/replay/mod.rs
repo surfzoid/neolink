@@ -1694,51 +1694,63 @@ pub(crate) async fn main(opt: Opt, reactor: NeoReactor) -> Result<()> {
             let start_time = date_to_replay_start(y, m, d);
             let end_time = date_to_replay_end(y, m, d);
 
-            let handle_result = camera
-                .run_task(|cam| {
-                    let st = start_time.clone();
-                    let et = end_time.clone();
-                    let stream = stream.clone();
-                    let record_type = record_type.clone();
-                    Box::pin(
-                        async move {
-                            cam.get_file_list_handle(&stream, &record_type, st, et)
+            // When --stream is not specified, query both mainStream and subStream.
+            // Cameras (e.g. Argus 3) store mainStream and subStream as separate files.
+            let streams_to_query: Vec<String> = match stream {
+                Some(s) => vec![s],
+                None => vec!["mainStream".to_string(), "subStream".to_string()],
+            };
+
+            let mut files: Vec<_> = Vec::new();
+            for stream_name in &streams_to_query {
+                let handle_result = camera
+                    .run_task(|cam| {
+                        let st = start_time.clone();
+                        let et = end_time.clone();
+                        let sn = stream_name.clone();
+                        let record_type = record_type.clone();
+                        Box::pin(async move {
+                            cam.get_file_list_handle(&sn, &record_type, st, et)
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))
-                        },
-                    )
-                })
-                .await;
+                        })
+                    })
+                    .await;
 
-            // E1 cameras return 400 when no recordings exist for the date
-            let handle_info = match handle_result {
-                Ok(info) => info,
-                Err(e) => {
-                    let msg = format!("{}", e);
-                    if msg.contains("returned code 400") {
-                        println!("No files for this day.");
-                        return Ok(());
+                let handle_info = match handle_result {
+                    Ok(info) => info,
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        if msg.contains("returned code 400") {
+                            // No recordings for this stream/day — try next stream
+                            continue;
+                        }
+                        return Err(e).context("Could not get file list handle from camera");
                     }
-                    return Err(e).context("Could not get file list handle from camera");
-                }
-            };
+                };
 
-            let handle = match handle_info.handle {
-                Some(h) => h,
-                None => anyhow::bail!("Camera did not return a file list handle"),
-            };
+                let handle = match handle_info.handle {
+                    Some(h) => h,
+                    None => continue, // no handle = no files for this stream
+                };
 
-            let files = camera
-                .run_task(|cam| {
-                    Box::pin(
-                        async move {
+                let stream_files = camera
+                    .run_task(|cam| {
+                        Box::pin(async move {
                             cam.get_file_list_by_handle(handle)
                                 .await
-                                .context("Could not get file list from camera")
-                        },
-                    )
-                })
-                .await?;
+                                .map_err(|e| anyhow::anyhow!("{}", e))
+                        })
+                    })
+                    .await
+                    .context("Could not get file list from camera")?;
+                files.extend(stream_files);
+            }
+
+            if files.is_empty() {
+                println!("No files for this day.");
+                return Ok(());
+            }
 
             // Apply --ai-filter: only show files whose recordType contains at least one requested tag
             let files = if let Some(ref filter) = ai_filter {
