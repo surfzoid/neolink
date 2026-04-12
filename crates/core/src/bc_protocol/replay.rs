@@ -382,8 +382,9 @@ impl BcCamera {
         }
     }
 
-    /// List files by handle from get_file_list_handle (MSG 15).
-    pub async fn get_file_list_by_handle(&self, handle: u32) -> Result<Vec<FileInfo>> {
+    /// Fetch one page of files by handle (MSG 15). Returns the file list for this page.
+    /// An empty vec means no more pages.
+    async fn get_file_list_page(&self, handle: u32) -> Result<Vec<FileInfo>> {
         let connection = self.get_connection();
         let msg_num = self.new_message_num();
         let mut sub = connection
@@ -423,10 +424,12 @@ impl BcCamera {
         let msg = sub.recv().await?;
 
         if msg.meta.response_code != 200 {
-            return Err(Error::CameraServiceUnavailable {
-                id: msg.meta.msg_id,
-                code: msg.meta.response_code,
-            });
+            // Non-200 signals end of results (same pattern as alarm_video_search_next)
+            log::debug!(
+                "get_file_list_page: response {} — treating as end of list",
+                msg.meta.response_code
+            );
+            return Ok(vec![]);
         }
 
         if let BcBody::ModernMsg(ModernMsg {
@@ -445,6 +448,23 @@ impl BcCamera {
                 why: "Expected FileInfoList xml in response",
             })
         }
+    }
+
+    /// List all files by handle from get_file_list_handle (MSG 15), paginating until empty.
+    pub async fn get_file_list_by_handle(&self, handle: u32) -> Result<Vec<FileInfo>> {
+        let mut all_files = Vec::new();
+        let mut page = 0usize;
+        loop {
+            let batch = self.get_file_list_page(handle).await?;
+            if batch.is_empty() {
+                log::debug!("get_file_list_by_handle: {} total files in {} pages", all_files.len(), page);
+                break;
+            }
+            page += 1;
+            log::debug!("get_file_list_by_handle: page {} returned {} files", page, batch.len());
+            all_files.extend(batch);
+        }
+        Ok(all_files)
     }
 
     /// Alarm video search: START (MSG 175). Returns the response containing a fileHandle.
