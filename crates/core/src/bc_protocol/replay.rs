@@ -159,13 +159,15 @@ const FILE_NAME_OFFSET: usize = 0x24; // cFileName at +0x24 (SDK_LOG confirms: "
 const FILE_NAME_MAX: usize = 0x100; // 256 bytes (conservative; 0x500 bytes available between 0x24 and 0x524)
 
 /// Build the 0xD48-byte BC_DOWNLOAD_BY_NAME_INFO payload for download-file-by-name (MSG 8).
-/// Layout (from Ghidra): iChannel (4), cUID (32, zeroed), cFileName (256, at 0x24), rest zeroed.
+/// Layout (from Ghidra): iChannel (4), cUID (32, at 0x04), cFileName (256, at 0x24), rest zeroed.
 /// The camera reads channel + filename and streams the raw file back. Output path at 0x524 is
 /// SDK-internal (local filesystem path) and not meaningful to send; left zeroed.
-pub fn build_download_by_name_payload(channel_id: u8, file_name: &str) -> Vec<u8> {
+pub fn build_download_by_name_payload(channel_id: u8, uid: &str, file_name: &str) -> Vec<u8> {
     let mut out = vec![0u8; BC_DOWNLOAD_BY_NAME_INFO_SIZE];
     out[0..4].copy_from_slice(&(channel_id as u32).to_le_bytes());
-    // cUID at offset 4 (32 bytes, zeroed — same pattern as build_download_by_time_payload)
+    let uid_bytes = uid.as_bytes();
+    let uid_len = uid_bytes.len().min(32);
+    out[4..4 + uid_len].copy_from_slice(&uid_bytes[..uid_len]);
     let name_bytes = file_name.as_bytes();
     let name_len = name_bytes.len().min(FILE_NAME_MAX - 1); // reserve 1 byte for null terminator
     out[FILE_NAME_OFFSET..FILE_NAME_OFFSET + name_len].copy_from_slice(&name_bytes[..name_len]);
@@ -1517,7 +1519,7 @@ impl BcCamera {
     ///
     /// Layout confirmed from Android SDK Ghidra analysis:
     ///   offset 0x00: iChannel (uint32_t)
-    ///   offset 0x04: cUID (32 bytes, zeroed)
+    ///   offset 0x04: cUID (32 bytes, camera UID as ASCII string)
     ///   offset 0x24: cFileName (null-terminated C string, file name from file list)
     ///   total: 0xD48 = 3400 bytes (remaining fields zeroed)
     pub async fn start_download_file_by_name(
@@ -1532,7 +1534,8 @@ impl BcCamera {
         let start_msg_num = self.new_message_num();
         let stop_msg_num = self.new_message_num();
         let channel_id = self.channel_id;
-        let payload = build_download_by_name_payload(channel_id, file_name);
+        let uid = self.uid().await.unwrap_or_default();
+        let payload = build_download_by_name_payload(channel_id, &uid, file_name);
         let buffer_size = if buffer_size == 0 { 100 } else { buffer_size };
         const DEFAULT_DUMP_LIMIT: usize = 131072;
         let dump_limit = dump_replay_limit.unwrap_or(DEFAULT_DUMP_LIMIT);
